@@ -1,0 +1,79 @@
+TYBEC Release R16.0
+==================
+
+Date  : 2017.01.13
+By    : Waqar Nabi
+
+1. Strictly Internal release.
+
+2. RAW results
+
+3. ROOFLINE estimate now incorporated, and tex file of plot is generated as  well. The older EWIT calculation is  still there
+too though.
+
+4. This is the final "TIR-16" version before I make major changes for TIR-17 (i.e. merge manage and computer ir, new  syntax for accessing memories inside kernels, smart buffering)
+
+
+
+=====================
+TYBEC Release History
+=====================
+
+TYBEC Release 0.03
+==================
+
+Date  : 2016.10.01
+By    : Waqar Nabi
+
+1. Strictly Internal release.
+
+2. Used for RECONFIG-2015 and FPGA-2016 results
+
+3. Key update is a cleanup of the compiler code, and a fresh approach to the analysis stage which uses the new "callGraph" hash to analyse
+at the END of the parse operation, rather than interleaving analysis with parsing.
+
+4. Some other updates to cost model as well.
+
+5. Peer-kernel code-generation in process, but not completed.
+
+6. New feature allowing hardware specs to be entered as a hash table, which in turn informs esimate(), showing us percentage utilization of resources, bandwidth etc.
+
+7. Release-trigger is the requirement for more formal documentation of TyTra-IR and the cost model, along with the expected changes.
+
+
+TYBEC Release 0.02
+==================
+
+Date  : 2015.03.11
+By    : Waqar Nabi
+
+1. Strictly Internal release.
+
+2. Used for HLFPGA 2015 (Parco) results.
+
+3. Tested on SOR. Not tested beyond but should work with similar complexity examples.
+
+4. TyBEC-estimator is operational, and good enough results for HEART.
+
+5. TyBEC-code generator is also operations, and has been tested for synthesis and simulation. Code-generator emits limited design that can work on LocalMem only. No GMem or CPU streams yyet. Also no peer kernels.
+
+6. BATCH MODE introduced, where multiple TIRL files in a folder can be compiled with a single command, and their estimates compiled in a single LOG file.
+
+
+TYBEC Release 0.01
+==================
+
+Date  : 2016.03.11
+By    : Waqar Nabi
+
+1. First release of TyBEC. Strictly Internal release.
+
+2. Used for HEART 2015 results.
+
+3. Can parse simpleVectorOps example, and relaxBodo. Not tested beyond these examples but should work with similar complexity examples.
+
+4. TyBEC-estimator is operational, and good enough results for HEART.
+
+5. The release has file for code-generator, but is work in progress for this release.
+
+ 

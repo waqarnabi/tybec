@@ -1,0 +1,3 @@
+Experimental results from micro-benchmarks are stored here.
+They are used by TyBEC to lookup and interpolate estimates for 
+various costing parameters.
