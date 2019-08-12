@@ -1,0 +1,33 @@
+To Build::
+
+1. perl make_lib.pl
+
+2. Can do one of following (if you are on tytra@bolama, you can use alias indicated in <>)
+
+a. (emu)            aoc -v --report -march=emulator --board p385_hpc_d5 -l hdl_lib.aoclib -L lib -I lib kernels.cl    <aoclib-emu>
+b. (hw)             aoc -v --report --board p385_hpc_d5 -l hdl_lib.aoclib -L lib -I lib                 kernels.cl    <aoclib-hw>
+c. (estimate-only)  aoc -c -v --report --board p385_hpc_d5 -l hdl_lib.aoclib -L lib -I lib              kernels.cl    <aoclib-estimate>
+
+Note that emulation will not execute as the HDL library cannot be emulated. So you will have to do complete hardware synthesis if you want to test functionality
+
+3. make
+
+4. 
+hw run: ./host kernels.aocx
+emy run: env CL_CONTEXT_EMULATOR_DEVICE_ALTERA=1 ./host.exe kernels.aocx
+
+
+** OR **
+
+: In place of 1-3, run one of the following scripts
+(first chmod +x them)
+. ./build_emu.sh (emulation build)
+. ./build_hw.sh (hardware build)
+[Note the extra dot at the beginning]
+
+
+
+
+
+
+

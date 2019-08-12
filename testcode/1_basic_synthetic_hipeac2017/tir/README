@@ -1,0 +1,90 @@
+
+As of 2017.06.08: Versions that compile with TYBEC are
+ - ver 1
+ - ver 4
+
+
+Version 1:
+----------
+TIR-17, Baseline implementation with no splits, merges or ND operations. 
+>> parse    > ok
+>> DFG      > ok
+>> analyze  > no
+>> estimate > no
+>> generate > no
+
+[legacy version]
+I realized that when I was conneting two func-call nodes via explicit memories and streams, I was doing something redundant as I am going to try to infer syncrhonizing FIFO on ALL edges anyway... so no need to make it explicit for this case only... 
+The DFG is complete without it, the IR is a LOT more cleaner (along with the DFG), and I dont loose anything.
+The syntax is still there of course, and my parser is able to handle it and generate the DFG, but I am removing it from the IR. The legacy version shows that syntax
+
+
+Version 2: XXX OBSOLETE XXX
+----------
+kernel_map_f1 is implemented as: PNDMap 2
+split/merge: implemented using vector variables and explicit casting
+NDMap:  
+       kernel called repeatedly inside parent kernel
+       splitted streams passed to the multiple copies
+       no explicit indication that they should be parallel
+       expectation that TyBEC will figure it out
+>> parse    > no
+>> analyze  > no
+>> estimate > no
+>> generate > no
+       
+Version 3: XXX OBSOLETE XXX
+----------
+kernel_map_f1 is implemented as: PNDMap 2
+split/merge: implicit implementation by use of keyword pndmap
+NDMap: same as above
+>> parse    > no
+>> analyze  > no
+>> estimate > no
+>> generate > no
+
+Version 4: <<<<< USE THIS >>>>>>>>>
+----------
+kernel_map_f1 is implemented as: PNDMap 2
+split/merge: explicit "split" and "merge" commands used 
+NDMap: same as ver 3,4
+>> parse    > no
+>> analyze  > no
+>> estimate > no
+>> generate > no
+
+[legacy version]
+I realized that when I was conneting two func-call nodes via explicit memories and streams, I was doing something redundant as I am going to try to infer syncrhonizing FIFO on ALL edges anyway... so no need to make it explicit for this case only... 
+The DFG is complete without it, the IR is a LOT more cleaner (along with the DFG), and I dont loose anything.
+The syntax is still there of course, and my parser is able to handle it and generate the DFG, but I am removing it from the IR. The legacy version shows that syntax
+
+
+Version 5: XXX OBSOLETE XXX
+----------
+kernel_map_f1 is implemented as: PNDMap 2
+split/merge and NDMap: same as Version 2
+new: explicit coalesced (vector) memory access at the main()
+>> parse    > no
+>> analyze  > no
+>> estimate > no
+>> generate > no
+
+Version 6:
+----------
+Baseline version with 2D arrays, in order to experiment hybrid-stencil-buffers (BRAM + FFs)
+* Introduced syntax for creating 2D counters from 1D streams
+>> parse    > no
+>> analyze  > no
+>> estimate > no
+>> generate > no
+
+ 
+ 
+ ** TODO **
+ 1. explicit access to a memory space inside a kernel (e.g scratchpad)
+ 2. Incorporate the following two ways of split and merge
+   -- explicit split and merge command
+   -- pndmap etc
+ 3. stream2d and stream3d (just now I only allow counters)
+ 4. DISTRIBUTE (merge M + split N)
+ 

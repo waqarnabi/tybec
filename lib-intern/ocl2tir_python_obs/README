@@ -1,0 +1,6 @@
+# Waqar Nabi, Glasgow, 2019.02.13
+
++ This was based on MSc student group project, fall 2018
++ There was some bugs, and the general approach seemed limited, esp as I already had defined a grammar and rec-descent 
+pass for llvm code for c2llvm2tir.
++ So the project being made obsolete, with useful features being ported to ../ocl2tir

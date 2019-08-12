@@ -1,0 +1,1 @@
+(vin0[i] + vin1[i])*(vin0[i] + vin1[i])*32

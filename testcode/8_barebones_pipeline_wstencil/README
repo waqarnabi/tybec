@@ -1,0 +1,19 @@
+WN, Glasgow, 2018.11.09
+=======================
+
+This a synthetic, barebones example to test stencil code, which should lead to creation of streaming buffers. I am not considering static-buffering for stencils here though.
+
+FORTRAN has not been written. 
+TODO: Do fortran so that can test with  Wim's tool.
+
+NOTE: The meaning of i and j is opposite in C (i is rows, j is cols) vs TIR (i is cols, j is rows)
+
+BUILD & RUN (C and Fortran)
+------------
+0. cd ./c (./fortran)
+1. scons
+2. ./barebonesStencil.exe
+
+TIR VERSIONS
+------------
+See ./tir/README      

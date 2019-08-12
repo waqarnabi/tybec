@@ -1,0 +1,101 @@
+WN, Glasgow, 2019.06
+---------------------
+
+To run TYBEC: tybec.pl --i coriolis.tirl --g --cio --iov <vect-factor>
+
+## NOTE ## Most versions do not differ in the source TIR, but only in the flags, code generation templates, and other back-end related features used, all of which happens after you run tybec on them locally. So all versions may not be available if you are seeing this in a repo.
+
+
+* ver 1 *
++ Vanilla, mode = 1 (no cordics, i.e. no sine/cosine)
++ Done only for costing (for Cris's paper, Reconfig, 2019)
+
+* ver 2 *
++ This is for fully functional code generation and testing with vectorization on HW
++ I add a grid in the problem (rather than a sinle point) in order to have a mappable stream of inputs I can
+experimetn with. This means we are no longer interested in the motion of just one point, but a complete 2D grid.
+
+* ver 3 *
++ Same as ver2, only now experimenting with vectorization
+
+
+#-------------------
+# ver 4 - ver 15, 
+# NEW template generated from sdaccel 2018.2
+# discarded as did not give peformance improvement for vectorization
+# NOTE: size _is_ baked into the FPGA config. Re-synthesis required if you want to change it
+#-------------------
+* ver 4_fullsynth * 
+* ver 4_localsim *
+SIZE = 512*512
+VECT = 1
+
+* ver 5_XXX *
+SIZE = 512*512
+VECT = 2
+
+* ver 6_XXX *
+SIZE = 512*512
+VECT = 4
+
+* ver 7_XXX *
+SIZE = 512*512
+VECT = 8
+
+* ver 8_XXX *
+SIZE = 512*512
+VECT = 16
+
+#-------------------
+
+* ver 10 *
+SIZE = 1024*1204
+VECT = 1
+
+* ver 11 *
+SIZE = 1024*1204
+VECT = 2
+
+..
+..
+
+#-------------------
+
+* ver 14 *
+SIZE = 2048*2048
+VECT = 1
+
+* ver 15 *
+SIZE = 2048*2048
+VECT = 2
+
+
+#-------------------
+# ver 20 - , 
+# back to OLD template, based on sdaccel githib repos
+#NOTE: SIZE _no_ longer baked into the FPGA config, so can change just by updating host
+#-------------------
+
+* ver 20 *
+SIZE = 1024*1204
+VECT = 1
+
+* ver 21 *
+SIZE = 1024*1204
+VECT = 2
+
+* ver 22 *
+SIZE = 1024*1204
+VECT = 4
+
+* ver 23 *
+SIZE = 1024*1204
+VECT = 8
+
+* ver 24 *
+SIZE = 1024*1204
+VECT = 16
+
+#-------------------
+verX: manual version for testing with NEW template (gen from sdaccel). discarded
+verY: manual version for resting with OLD template (function ok now - 2019.07.31 - so now basing code gen on this templae)

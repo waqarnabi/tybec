@@ -1,0 +1,1 @@
+make check TARGETS=hw DEVICES=$AWS_PLATFORM_DYNAMIC_5_0 all

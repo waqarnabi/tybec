@@ -1,0 +1,20 @@
+WN, Gainesville, 2017.06.19
+============================
+
+This is the zeroth test-case for TyBEC-17. 
+It is a synthetic, barebones example to get the entire flow working (all the way to rtl and opencl-wrapper generation).
+
+The example is designed to be the absolute barebones case and does not expose most of the issues we are actually interesting in w.r.t smart caching, scheduling and synchronization. Basically we are following the prototyping approach.
+
+FORTRAN has not been written. 
+TODO: Do fortran so that can test with  Wim's tool.
+
+BUILD & RUN (C and Fortran)
+------------
+0. cd ./c (./fortran)
+1. scons
+2. ./barebones.exe
+
+TIR VERSIONS
+------------
+See ./tir/README      

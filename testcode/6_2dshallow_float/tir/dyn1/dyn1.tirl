@@ -1,0 +1,141 @@
+;-- =============================================================================
+;-- Company      : Unversity of Glasgow, Comuting Science
+;-- Author:        Syed Waqar Nabi
+;-- 
+;-- Create Date  : 2014.11.03
+;-- Project Name : TyTra
+;--
+;-- Dependencies : 
+;--
+;-- Revision     : 
+;-- Revision 0.01. File Created
+;-- 
+;-- Conventions  : 
+;-- =============================================================================
+;--
+;-- =============================================================================
+;-- General Description
+;-- -----------------------------------------------------------------------------
+;-- Tytra-IR BACKEND file DYN1 kernel from 2d-shallow-water
+;--
+;--
+;-- =============================================================================
+;--
+#define SIZE 1024
+
+;--I have the same arithmetic instructions for data_t/int for now
+#define fadd add
+#define fsub sub
+#define fmul mul
+#define fdiv udiv
+
+#define data_t float32
+
+;--constants (init to random values)
+#define dt  0.1
+#define dx  0.1 
+#define dy  0.1
+#define g   9.8
+
+; -----------------------------------------------------------------------------
+; Top
+; -----------------------------------------------------------------------------
+
+define void @dyn1   ( data_t %u_j_k
+                    , data_t %v_j_k
+                    ;--, data_t %h_j_k
+                    , data_t %eta_j_k
+                    , data_t %eta_j_kp1
+                    , data_t %eta_jp1_k
+                    ;--, data_t %etan_j_k
+                    ;--, data_t %wet_j_k
+                    ;--, data_t %wet_j_kp1
+                    ;--, data_t %wet_jp1_k
+                    ;--, data_t %hzero_j_k
+                    ;--, data_t %j
+                    ;--, data_t %k
+                    , data_t %un_j_k
+                    , data_t %vn_j_k
+                    ) pipe
+{
+  ;-- duu
+  data_t %sub    = fsub data_t 0, dt
+  data_t %mul    = fmul data_t %sub, g
+  data_t %sub6   = fsub data_t %eta_j_kp1, %eta_j_k
+  data_t %mul7   = fmul data_t %mul, %sub6
+  data_t %div    = fdiv data_t %mul7, dx
+  
+  ;--dvv
+  data_t %sub8   = fsub data_t 0, dt
+  data_t %mul9   = fmul data_t %sub8, g
+  data_t %sub10  = fsub data_t %eta_jp1_k, %eta_j_k
+  data_t %mul11  = fmul data_t %mul9, %sub10
+  data_t %div12  = fdiv data_t %mul11, dy
+
+  ;--un 
+  data_t %uu     = load data_t %u_j_k
+  data_t %un_j_k = fadd data_t %uu, %div
+
+  ;--uvn
+  data_t %vv     = load data_t %v_j_k
+  data_t %vn_j_k = fadd data_t %vv, %div12
+
+  ret void
+
+}
+
+
+; ----------------------------------------------------------
+; -- ** MAIN
+; ----------------------------------------------------------
+define void @main () {
+
+  ;--NOTE: I should be creating the stencil values through offset instruction
+  ;-- but since this is a standalone unit kernel, it's not important
+  %u_j_k      = alloca [SIZE x data_t], addrspace(1)
+  %u_j_k      = alloca [SIZE x data_t], addrspace(1)
+  %v_j_k      = alloca [SIZE x data_t], addrspace(1)
+  ;--%h_j_k      = alloca [SIZE x data_t], addrspace(1)
+  %eta_j_k    = alloca [SIZE x data_t], addrspace(1)
+  %eta_j_kp1  = alloca [SIZE x data_t], addrspace(1)
+  %eta_jp1_k  = alloca [SIZE x data_t], addrspace(1)
+  ;--%etan_j_k   = alloca [SIZE x data_t], addrspace(1)
+  ;--%wet_j_k    = alloca [SIZE x data_t], addrspace(1)
+  ;--%wet_j_kp1  = alloca [SIZE x data_t], addrspace(1)
+  ;--%wet_jp1_k  = alloca [SIZE x data_t], addrspace(1)
+  ;--%hzero_j_k  = alloca [SIZE x data_t], addrspace(1)
+  %un_j_k     = alloca [SIZE x data_t], addrspace(1)
+  %vn_j_k     = alloca [SIZE x data_t], addrspace(1)
+
+  %u_j_k_stream_load      = streamread data_t, data_t*  %u_j_k        , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  %v_j_k_stream_load      = streamread data_t, data_t*  %v_j_k        , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  ;--%h_j_k_stream_load      = streamread data_t, data_t*  %h_j_k        , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  %eta_j_k_stream_load    = streamread data_t, data_t*  %eta_j_k      , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  %eta_j_kp1_stream_load  = streamread data_t, data_t*  %eta_j_kp1    , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  %eta_jp1_k_stream_load  = streamread data_t, data_t*  %eta_jp1_k    , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  ;--%etan_j_k_stream_load   = streamread data_t, data_t*  %etan_j_k     , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  ;--%wet_j_k_stream_load    = streamread data_t, data_t*  %wet_j_k      , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  ;--%wet_j_kp1_stream_load  = streamread data_t, data_t*  %wet_j_kp1    , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  ;--%wet_jp1_k_stream_load  = streamread data_t, data_t*  %wet_jp1_k    , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  ;--%hzero_j_k_stream_load  = streamread data_t, data_t*  %hzero_j_k    , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  streamwrite data_t %un_j_k_stream_store, data_t* %un_j_k, !tir.stream.type   !stream1d, !tir.stream.saddr  !0, !tir.stream.size   !SIZE, !tir.stream.stride !1
+  streamwrite data_t %vn_j_k_stream_store, data_t* %vn_j_k, !tir.stream.type   !stream1d, !tir.stream.saddr  !0, !tir.stream.size   !SIZE, !tir.stream.stride !1
+
+  call @dyn1  ( data_t %u_j_k_stream_load
+              , data_t %v_j_k_stream_load
+              ;--, data_t %h_j_k_stream_load
+              , data_t %eta_j_k_stream_load
+              , data_t %eta_j_kp1_stream_load
+              , data_t %eta_jp1_k_stream_load
+              ;--, data_t %etan_j_k_stream_load
+              ;--, data_t %wet_j_k_stream_load
+              ;--, data_t %wet_j_kp1_stream_load
+              ;--, data_t %wet_jp1_k_stream_load
+              ;--, data_t %hzero_j_k_stream_load
+              ;--, data_t %j
+              ;--, data_t %k
+              , data_t %un_j_k_stream_store
+              , data_t %vn_j_k_stream_store
+              )
+  ret void
+}

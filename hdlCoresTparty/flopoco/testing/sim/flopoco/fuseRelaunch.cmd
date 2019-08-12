@@ -1,0 +1,1 @@
+-intstyle "ise" -incremental -lib "unisims_ver" -lib "unimacro_ver" -lib "xilinxcorelib_ver" -lib "secureip" -o "C:/WAQAR/GU/Work/_TyTra_BackEnd_Compiler_/TyBEC/lib-intern/flopoco/testing/sim/flopoco/testbench_isim_beh.exe" -prj "C:/WAQAR/GU/Work/_TyTra_BackEnd_Compiler_/TyBEC/lib-intern/flopoco/testing/sim/flopoco/testbench_beh.prj" "work.testbench" 

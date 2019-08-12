@@ -1,4 +1,6 @@
 #!/usr/bin/perl -w
+use 5.012; # so readdir assigns to $_ in a lone while test
+ 
 
 # =============================================================================
 # Company      : Unversity of Glasgow, Comuting Science
@@ -9,8 +11,10 @@
 #
 # Dependencies : See ./README.txt
 #               
-# Revision     : 
-# Revision 0.01. File Created
+# Revision     :  ** Tybec-17 **
+#                   See ../TyBEC_Releases/ for releases 
+#                    (the README in the latest version will have info for all
+#                     previous releases)
 # 
 # Conventions  : 
 # =============================================================================
@@ -20,43 +24,12 @@
 # -----------------------------------------------------------------------------
 # 1. A parser for lower TIR
 #
-# 2. Following functions implemented:
-#  - parse TIRL and generate tokens
-#  - calculate cost and annotate TIRL
-#  - generate synthesizeable verilog for target
+# 2. ******** THIS IS TIR-17 version. See ./RELEASE for more details.
 #
-# TODOs:
-# =====
+# TODOs and NOTEs:
+# =================
 #
-#  - Search for "TODO" in the associated source code perl files
-#-----------------------------------------------------------------------
-# Configurations, and validity for (P)arsing, (C)osting, and (G)eneration
-#-----------------------------------------------------------------------
-#
-# 1 = done
-# 0 = not done 
-  # X = not done AND Not TODO (for now at least)
-  # + = not done AND TODO now
-#
-# Configuration     | P | A | C | G |Remarks              
-# --------------    |---|---|---|---|------------------------------
-# cPipe             | 1 | 1 |   | 1 |Single pipeline       
-# cPar_PipeS        | 1 | 1 |   | + |Parallel Lanes of  symmetric  pipelines
-# cPar_PipeA        | 1 | 1 |   | X |Parallel Lanes of asymmetric piplines
-# cPipe_PipeS       | 1 | 1 |   | X |Single pipeline of  symmetric pipelines (loop unroll)
-# cPipe_PipeA       | 1 | 1 |   | 1 |Single pipeline of asymmetric pipelines (coarse-pipeline)
-# cPar_PipeA_PipeS  |   |   |   | X |Par Lanes of asymmetric pipes: Each is pipeline of  symmetrical pipelines
-# cPar_PipeS_PipeS  |   |   |   | X |Par Lanes of  symmetric pipes: Each is pipeline of  symmetrical pipelines
-# cPar_PipeA_PipeA  |   |   |   | X |Par Lanes of asymmetric pipes: Each is pipeline of asymmetrical pipelines
-# cPar_PipeS_PipeA  |   |   |   | + |Par Lanes of  symmetric pipes: Each is pipeline of asymmetrical pipelines
-# cPar_PipeA_PipeX  |   |   |   | X |Par Lanes of asymmetric pipes: Each is pipeline of symm' OR asymm' pipelines
-# cSeq              | 1 | 1 |   | X |A single sequential processor                      
-# cParSeq           |   |   |   | X |Multiple sequential processors in parallel (SIMD) 
-# cPipeSeq          |   |   |   | X |Multiple sequential processors in pipeline             
-# cPar              |   |   |   | X |A single instruction VLIW processor
-# cPipePar          |   |   |   | X |Pipeline of parallel blocks, a pipeline of single instruction VLIW processors 
-
-
+#  - Search for "TODO"  and "NOTE" 
 # =============================================================================
 
 #----------------------
@@ -69,11 +42,16 @@
 # ----------------------
 # TyBEC RELEASE
 # ----------------------
-our $tybecRelease = 'R0.03';
+our $tybecRelease = 'R17.0';
 
-# ----------------------
-# Generic Modules
-# ----------------------
+# ============================================================================
+# GENERIC MODULES
+# ============================================================================
+# NOTE: All generic, 3rd party perl modules I use are always "brough along" with the code
+# in ./lib-extern. So you need to ensure that it is on your PERL path. (generally PERL5LIB)
+# Similarly all custom modules I wrote for TyBEC are in lib-intern, and that path needs 
+# to be included as well.
+
 use strict;
 use warnings;
 use Parse::RecDescent;  #the parser module
@@ -82,12 +60,12 @@ $::RD_ERRORS = 1; # Make sure the parser dies when it encounters an error
 $::RD_WARN   = 1; # Enable warnings. This will warn on unused rules &c.
 $::RD_HINT   = 1; # Give out hints to help fix problems.
 
-
 use Regexp::Common;     #generate common regexs from this utility
 use Tree::DAG_Node;     #for generating call trees
 use Data::Dumper;
 use File::Copy qw(copy);
 use File::Path qw(make_path remove_tree);
+use File::Copy::Recursive qw(fcopy rcopy dircopy fmove rmove dirmove);
 use List::Util qw(min max);
 use Getopt::Long;   #for command line options
 use IO::Tee; #muxign output to STDOUT and Log file
@@ -105,12 +83,24 @@ use File::Path qw(make_path remove_tree);
 
 use List::Util qw(min max);
 
+use Graph;
+
+use JSON;
+
 # ----------------------
 # TyBEC specific modules
 # ----------------------
 use Cost;             #read cost database and functions from Cost.pm
-use HdlCodeGen;       #codeGenerator functions
 use HardwareSpecs;    #specification of target hardware
+use TirGrammarMod;    #the module with callbacks for grammar
+use HdlCodeGen;       #codeGenerator (dataflow implemented in Verilog HDL) functions
+use OclCodeGen_aocl;  #OCL wrapper code for AOCL
+use OclCodeGen_sdx;   #OCL wrapper code for SDx
+
+# ============================================================================
+# GRAMMAR
+# ============================================================================
+use TirGrammarMod;       #read Grammar from TirGrammarMod.pm
 
 # ============================================================================
 # START TIMER
@@ -118,10 +108,8 @@ use HardwareSpecs;    #specification of target hardware
 my $start = Time::HiRes::gettimeofday();
 
 # ============================================================================
-# GLOBALS and Initialization
+# GLOBALS 
 # ============================================================================
-#use vars qw(%VARIABLE); #global variable?
-
 #hash for storing ALL parsed tokens in the TIR
 our %CODE; 
 
@@ -131,138 +119,487 @@ our %BATCH;
 #function call graph
 our %callGraph;
 
-our $BODY; #global variable?
+our $BODY; 
 
 our $funCntr;       #counter to keep track of multiple calls to same function
-our $insCntr;        #counter for number of instructions in a function
+our $insCntr;       #counter for number of instructions in a function
 our $glComputeInstCntr; #counter for total number of GLOBAL compute intructions (all functions).
-our $insCntrFcall;   #counter for number of function_call instructions in a function
+our $insCntrFcall;      #counter for number of function_call instructions in a function
 our $argSeq;       #counter for sequence number of arguments in a function definition
 our $argSeq2;      #counter for sequence number of arguments in a called function instruction
-
 our $NparPipes;     #total number of parallel (top-level) pipes
-#our $parTop;        #name of top level par module (if applicable)
-#our $pipeTop;       #name of top level pipe module (if applicable)
-#our $pipeSecond;    #name of second level pipe module (applicable only if top level is par)
-
-
 
 our $topFuncKey  ; #top func key in any configuration
 our $topFuncType ;
 our $topFuncName ;
-
 our $topPipeKey;    #Name of top-level PIPE in any config that has pipe (if it is CG, it is same is below)
 our $topCGpipeKey;  #name of the top CG pipe in cPipe_PipeA or cPar_PipeS_PipeA 
-
-
-#our $desConf;#what is the overall configuration of the design -- OBSOLETE
-our $desConfigNew;#what is the overall configuration of the design-- NEW VERSION
-
-our $designFail; #does the design meet resource and IO constraints?
-$designFail = 0;
+our $desConfigNew;  #what is the overall configuration of the design-- NEW VERSION
+our $designFail;    #does the design meet resource and IO constraints?
 
 # error messages
 our $dieConfigMsg = "TyBEC: **Illegal Configuration!**: Allowed configurations are:\n\tmain->pipe \n\tmain->par \n\tmain->pipe->par(s) \n\tmain->par->pipe(s) \n\tmain->par->pipe(s)->par(s)";
 our $dieNotSamePipesMsh = "TyBEC: **Illegal Configuration!**: All concurrent pipelines must be symmetrical"; 
 
-# Initialize
-# -------------------
-$CODE{launch}{wordsPerTuple} = 0;
-$funCntr = 0;
-$insCntr = 0;
-$glComputeInstCntr = 0;
-$insCntrFcall = 0;
-$NparPipes = 0;
-$argSeq = 0;
-$argSeq2 = 0;
+#global array used to temporarily store split-inputs/merge-outputs, which can be arbitrary
+#in number so we need to push them on an array and assign back to the relevant hash later
+our @split_outs;
+our @merge_ins;
 
-my $stages_pipe_top = 0;
-my $latency_pipe_top = 0;
+our $latency_pipe_top; 
+our $stages_pipe_top;
 
-# ------------------------------------
-# Create a Configuration Tree 
-# ------------------------------------ 
-our $tree = Tree::DAG_Node->new;
-$tree->name('launch');
+#The tuple annotated with the dot DFG generated can be verbose or not...
+our $VERBOSE_DFG_ANNOT=0;
 
-our $treeChild = Tree::DAG_Node->new;
-$treeChild->name('null');
-# ============================================================================
-# Utility routines
-# ============================================================================
-sub mymax ($$) { $_[$_[0] < $_[1]] }
-sub mymin ($$) { $_[$_[0] > $_[1]] }
-
-# ============================================================================
-# GRAMMAR
-# ============================================================================
-use TirGrammarMod;       #read Grammar from TirGrammarMod.pm
-
-# ============================================================================
 # Command Line
-# ============================================================================
+# ------------------------------------
 
 # default options
 our $inputFileTirl = "file.tirl"; #input TIRL file
+our $lambdaTxtFile = "lambda.txt"; #default lambda function file name
 our $outputBuildDir = './TybecBuild';
-our $outputRTLDir = './hdlGen/rtl';
+our $outFPGACode ; 
+our $outputRTLDir;
+our $outputTbDir ;
+our $outputSimDir;
+our $outputOCLDir;
+
+#our $outputRTLDir = './hdlGen/rtl';
+#our $genCodeDir = './genFPGACode';
+#our $outputOCLDir = './oclGen';
 our $debug = '';
 our $batch = '';
+our $c2llvm2tir = '';
 our $batchChild = '';
 our $autoParallelize = 1;
 our $help = '';
 our $showVer = '';
 our $genRTL = '';
-our $estimate = 1;
+our $estimate = '';
 our $dot = '';
-our $targetNode  = "bolamaNallatech";
+our $targetNode  = "awsf12x"; 
+#our $targetNode  = "bolamaNallatech"; 
 our $targetBoard = $HardwareSpecs::nodes{$targetNode}{boardName};
 our $targetDevice= $HardwareSpecs::boards{$targetBoard}{deviceName};
+our $lambda="";
+our $lambdaTxt="";
+our $ioVect=1;
+our $oclKernelPipe='';
 
-GetOptions (
-    'd'     => \$debug            #--debug
-  , 'batch' => \$batch            #--batch <run estimator on all .tirl files in folder with default options>
-  , 'i=s'   => \$inputFileTirl    #--i    <input TIRL FILE>
-  , 'obd=s' => \$outputBuildDir   #--obd  <output Build Directory>
-  , 'ord=s' => \$outputRTLDir     #--ord  <output director for RTL code generated>
-  , 'ilp'   => \$autoParallelize  #--ilp  <Should compiler find ILP in PIPEs>
-  , 'help'  => \$help             #--h    <Display help>
-  , 'v'     => \$showVer          #--v    <Show current TyBEC release version>
-  , 'g'     => \$genRTL           #--g    <Generate RTL code>
-  , 'e'     => \$estimate         #--e    <Estimate Resources and Performance from TIRL>
-  , 'dot'   => \$dot              #--dot  <Run DOT and display graph at the end of compile>
-  
-  
-  , 'batchChild' => \$batchChild  #--batchChild used internally by parent script of batch job to call childs and 
-                                  # and indicate they are part of a batch job, so that they compile key results to parent LOG
-  , 'tar' => \$targetBoard     #--target  <Name of target board>
-  );
+#Which OCX template version are you using?
+#ver 1 is the default baseline
+#ver 8 uses e.g. coalesced inputs
 
-#Display help
-if($help) {
-  printHelp();
-  exit;
+our $coalIOs = 1; #should I coalesce IOs?
+our $ocxTempVer; #template to use, depends on coalIO or not
+
+
+# Files
+# ------------------------------------ 
+our $tree;
+our $treeChild;
+our $TyBECROOTDIR = $ENV{"TyBECROOTDIR"};
+our $infh;
+our $outfh;
+our $outfh_json;
+our $logFilename;
+our $batchfh;
+our $batchLogFilename;
+our $tee;        
+our $dotfh;
+our $dotFilename;
+our @lines;
+our $fhinputpp;
+our $estfh;
+
+
+# Graphs
+# ------------------------------------ 
+our $dfGraph;
+our $dfGraphDot;
+our $dfgcluster ;
+our $legendcluster;
+our $notescluster;
+our $dotGraph;
+
+# parser
+# ------------------------------------ 
+our $parser;
+
+
+# ============================================================================
+# ::: MAIN :::: Call TyBEC subroutines
+# ============================================================================
+init(); 
+batch() if($batch);
+#c2llvm2tir() if($c2llvm2tir);
+preprocess();
+parse(); #always parse
+estimate()    if($estimate);
+generateHDL() if($genRTL);
+generateOCL() if($genRTL);
+post();
+
+#schedule();
+#analyze(); #always analyze
+#estimate() if($estimate);
+
+#ENDOF ::: MAIN :::: 
+
+
+
+# ****************************************************************************
+#                   *****   SUB ROUTINES for tybec.pl *****
+# ****************************************************************************
+# ============================================================================
+# Utility routines
+# ============================================================================
+sub mymax ($$) { $_[$_[0] < $_[1]] }
+sub mymin ($$) { $_[$_[0] > $_[1]] }
+sub roundOne  {
+  my $point = shift;
+  $$point = (int($$point*10+0.5))/10;
 }
-#Show version
-if($showVer) {
-  printVer();
-  exit;
+
+sub roundTwo  {
+  my $point = shift;
+  $$point = (int($$point*100+5))/100;
 }
 
+# ============================================================================
+# Pre-Processor  + GCC Pre-Processor
+# ============================================================================
+# This is ugly (having a macro parser as well as a GCC Pre-Processor.. TODO
+sub preprocess{
+$parser->MACROS("@main::lines") or die "Parser Macro rule failed!"; 
+
+my $tempMacExpFile = "temp.tirl";
+system("gcc -E -x c -P $inputFileTirl > $outputBuildDir/$tempMacExpFile");
+
+open($fhinputpp, "<", "$outputBuildDir/$tempMacExpFile")
+  or die "Could not open file '$tempMacExpFile' $!";
+}
+
+# ============================================================================
+# INITIALIZE()
+# ============================================================================
+sub init{  
+  print("******************************************************************\n");
+  print("TyBEC $tybecRelease\n");
+  print("******************************************************************\n");
+
+  # Initializing global variables
+  # -------------------
+  $CODE{launch}{wordsPerTuple} = 0;
+  $funCntr = 0;
+  $insCntr = 0;
+  $glComputeInstCntr = 0;
+  $insCntrFcall = 0;
+  $NparPipes = 0;
+  $argSeq = 0;
+  $argSeq2 = 0;
+  $stages_pipe_top = 0;
+  $latency_pipe_top = 0;  
+  $designFail = 0;
+
+  #reset instruction counter
+  $insCntr=0;
+  
+  #command-line
+  #--------------
+  GetOptions (
+      'clt'   => \$c2llvm2tir       #--tybec has been called by c2llvm2tir tool (don't expose this option to command line user)
+    , 'd'     => \$debug            #--debug
+    , 'batch' => \$batch            #--batch <run estimator on all .tirl files in folder with default options>
+    , 'i=s'   => \$inputFileTirl    #--i    <input TIRL FILE>
+    , 'obd=s' => \$outputBuildDir   #--obd  <output Build Directory>
+    #, 'ord=s' => \$outputRTLDir     #--ord  <output director for RTL code generated>
+    , 'help'  => \$help             #--h    <Display help>
+    , 'v'     => \$showVer          #--v    <Show current TyBEC release version>
+    , 'g'     => \$genRTL           #--g    <Generate RTL code>
+    , 'e'     => \$estimate         #--e    <Estimate Resources and Performance from TIRL>
+    , 'dot'   => \$dot              #--dot  <Run DOT and display graph at the end of compile>
+    
+    
+    , 'batchChild' => \$batchChild  #--batchChild used internally by parent script of batch job to call childs and 
+                                    # and indicate they are part of a batch job, so that they compile key results to parent LOG
+    , 'tar'     => \$targetBoard     #--target  <Name of target board>
+    , 'lambda' => \$lambda          # You are providing lambda function to create cpu baseline
+    , 'iov=s'  => \$ioVect          # Degree of IO vectorization (coalescing)
+    , 'op'     => \$oclKernelPipe   #Should I create the kernel (CG) pipeline in OCL
+    , 'cio'    => \$coalIOs         #Should I coalesce IOs? (makes OCS integration simpler)
+    );
+  
+  print "\n";
+  print "=====================================\n";
+  print "       TARGET HARDWARE               \n";
+  print "=====================================\n";
+
+  print "TyBEC: Target node is\t: $targetNode\n";
+  print "TyBEC: Target board is\t: $targetBoard\n";
+  print "TyBEC: Target device is\t: $targetDevice\n";
+  #my $hash = $main::CODE{top}; 
+
+  
+  #-------------------------------
+  #non-standard termination points
+  #-------------------------------
+  #Display help
+  if($help) {
+    printHelp();
+    exit;
+  }
+  #Show version
+  if($showVer) {
+    printVer();
+    exit;
+  }
+
+  #if batch
+  if($batch) {
+    batch();
+    exit;
+  }
+
+  #invalid command line arguments
+  if  (  ($ioVect!=1)
+      && ($ioVect!=2)
+      && ($ioVect!=4)
+      && ($ioVect!=8)
+      && ($ioVect!=16)
+      ) {
+    print("TyBEC: INVALID IO vectorization width\n");
+    exit;
+  }
+  
+  #-------------------------------
+  #standard run
+  #-------------------------------
+  
+  #choose template version for OCX/HDL 
+  
+  #used for FPODE, with SDX v2017.4
+  $ocxTempVer = 't01' if($coalIOs == 0); 
+  
+  #"t08"; #used for Hindawi, with SDX v2018.2, coalesced inputs, and coalesced outputs
+  $ocxTempVer= 't09'  if($coalIOs == 1);  
+
+  
+  print "\n";
+  print "=====================================\n";
+  print "       SETUP                 \n";
+  print "=====================================\n";
+  print "TyBEC: CPU baseline code for comparison selected\n" if($lambda);
+    
+  #files and io
+  #--------------  
+  #Root directory for TyBEC scripts
+  $TyBECROOTDIR = $ENV{"TyBECROOTDIR"};
+  
+  #make targe directories if not present
+  make_path($outputBuildDir);
+  
+  #other output directories in the build tree
+  $outFPGACode  ="$outputBuildDir/genFPGACode/$targetNode"; 
+  
+  #target directory structure depends on target node
+  if($targetNode eq 'awsf12x') {
+    $outputRTLDir ="$outFPGACode/src/hdl";
+    $outputTbDir  ="$outFPGACode/src/testbench";
+    $outputSimDir ="$outFPGACode/src/sim";
+    $outputOCLDir ="$outFPGACode";
+  } 
+  elsif($targetNode eq 'bolamaNallatech') {
+    $outputRTLDir ="$outFPGACode/rtl";
+    $outputTbDir  ="$outFPGACode/testbench";
+    $outputSimDir ="$outFPGACode/sim";
+    $outputOCLDir ="$outFPGACode/ocl";
+  }
+  else {die "Illegate target node definition\n";}
+  
+  #open input TIRL file
+  open($infh, "<", $inputFileTirl)
+    or die "Could not open file '$inputFileTirl' $!";
+    
+  #Read input TIRL contents; remove comments while reading
+  @lines = grep { /#.*/ } <$infh>; 
+
+  #read in lambda.txt file if applicable    
+  $lambdaTxt=read_file($lambdaTxtFile) if($lambda);
+  
+  #Create tokens.log (tokens parsed from TIRL are written this file)
+  $logFilename = "tokens.log";
+  open($outfh, '>', "$outputBuildDir/$logFilename")
+    or die "Could not open file '$logFilename' $!";
+    
+  #Create tokens.json as well
+  $logFilename = "tokens.json";
+  open($outfh_json, '>', "$outputBuildDir/$logFilename")
+    or die "Could not open file '$logFilename' $!";
+    
+  
+  #estimates.log 
+  my $estFilename = "estimates.csv";
+  open($estfh, '>', "$outputBuildDir/$estFilename")
+    or die "Could not open file '$estFilename' $!";
+
+
+  ##batch file if this is a batchChild
+  #if($batchChild) {
+  #  $batchLogFilename = "batchEstimates.csv";
+  #  open($batchfh, '>>', "$outputBuildDir/../../$batchLogFilename")
+  #      or die "Could not open file '$batchLogFilename' $!";
+  #}
+  
+  # Printing to LOG and STDOUT
+  # ----------------------------
+  $tee = new IO::Tee(\*STDOUT, new IO::File(">$outputBuildDir/build.log"));        
+  select $tee;        
+  
+  # DOT.png
+  # ----------------------------
+  if($dot) {
+    $dotFilename = "DOT.png";
+    open($dotfh, '>', "$outputBuildDir/$dotFilename")
+      or die "Could not open file '$dotFilename' $!";
+  }
+  close $infh; 
+  
+  # Create Dataflow Graph
+  # ----------------------------
+  $dfGraph    = Graph->new(multiedged => 1);  # A directed abstract graph, with multiedges enabled 
+  
+  #my $g0 = Graph->new(countedged => 1);
+  #my $g0 = Graph->new(multiedged => 1);
+  
+  $dfGraphDot = GraphViz->new();        # DOT visualization of the same graph
+  
+  #define cluster for DFG
+  $dfgcluster = {
+      name      =>'DFG',
+      style     =>'',
+      fillcolor =>'',
+      fontname  =>'',
+      fontsize  =>'',
+  };
+  
+  #add legend
+  $legendcluster = {
+      name      =>'Legend',
+      style     =>'filled',
+      fillcolor =>'lightyellow',
+      fontname  =>'',
+      fontsize  =>'',
+  };
+  $dfGraphDot -> add_node ('Impl Memory (SSA)'    , shape => 'ellipse'        , cluster => $legendcluster);
+  $dfGraphDot -> add_node ('Function-call Instr'  , shape => 'box3d'          , cluster => $legendcluster);
+  $dfGraphDot -> add_node ('Expl Memory (alloca)' , shape => 'box'            , cluster => $legendcluster);
+  $dfGraphDot -> add_node ('Functional argument'  , shape => 'invhouse'       , cluster => $legendcluster);
+  $dfGraphDot -> add_node ('Plain  argument'      , shape => 'invtriangle'    , cluster => $legendcluster);
+  $dfGraphDot -> add_node ('Autoindex'            , shape => 'hexagon'        , cluster => $legendcluster);
+  $dfGraphDot -> add_node ('Smache-offset'        , shape => 'doubleoctagon'  , cluster => $legendcluster);
+  
+  #add notes
+  $notescluster = {
+      name      =>'Notes',
+      style     =>'filled',
+      fillcolor =>'lightpink',
+      fontname  =>'',
+      fontsize  =>'',
+  };
+  
+  my $text;
+  if ($VERBOSE_DFG_ANNOT == 1){
+    $text = "5 attributes: (latency, actual-firing-interval, local-firing-interval, external-firing-interval, firings-per-output, starding delay)
+    That is: (LAT, AFI, LFI, EFI, FPO, SD)\n\n";
+  }
+  else                              {
+    $text = "2 attributes: (latency AND local-firing-interval a.k.a clocks-per-output))
+    That is: (LAT, LFI)\n\n";
+  }
+  
+  $dfGraphDot -> add_node (
+  "
+  1. The external-labels on the nodes is a tuple showing these $text
+  2. Edges can refer to both explicit and implicit streams.
+    Implicit: The source.destination label on the edge matches *both* the source and destination nodes.
+    Explicit: The source.destination label does not match *one of* the source or destination node. The part that does not match on the edge-label refers to the explicit stream\n\n
+  "         
+    , shape => 'note'    , cluster => $notescluster);
+
+  # Create DOT graph (call-tree)
+  # ----------------------------
+  $dotGraph = GraphViz->new();
+
+  # Create Parser
+  # ----------------------------
+  $parser = Parse::RecDescent->new($TirGrammarMod::grammar);  
+
+}#init()
+
+# ============================================================================
+# BATCH()
+# ============================================================================
 #if batch job, create a folder for each file, run the script for it in that folder
 #-------------
-if($batch) {
+sub batch{
+  $batchLogFilename = "batchEstimates.csv";
+  #print "$outputBuildDir/../$batchLogFilename\n";
+  #overWrite
+  open($batchfh, '>', "./$batchLogFilename")
+      or die "Could not open file '$batchLogFilename' $!";
+
   my @allFiles = <*.tirl>;
   
   print "TyBEC: Running in BATCH mode. All TIRL files in current folder will be compiled\n";
   print "WARNING: Previous build folders in the current directory will be deleted if you continue\n";
   print "Are you sure you wish to continue? (y/n) \n";
 
-  #chomp (my $yesno = <>);
-  #if($yesno eq 'n') {exit;}
+  chomp (my $yesno = <>);
+  if($yesno eq 'n') {exit;}
   
   #remove all directories in current folder
-  system("rm batch.log");
+  system("rm batchEstimates.log");
+  
+  #Write estimates.log (and batchEstimates.log if applicable)
+  #----------------------------------------------------------
+  #NOTE: These ***MUST*** be in the same sequence as the entries made at the end
+  #of the call to estimate() for each batch child
+  print $batchfh "                                          ,         \n";
+  print $batchfh "PARAMETER                                 ,UNITS    \n";
+  print $batchfh "Performance                               ,GBop/sec \n";
+  print $batchfh "Frequency                                 ,MHz      \n";
+  print $batchfh "alutsTotal                                ,         \n";
+  print $batchfh "regsTotal                                 ,         \n";
+  print $batchfh "bramTotal                                 ,         \n";
+  print $batchfh "dspTotal                                  ,         \n";
+  print $batchfh "Host sust' BW                             ,Mbps     \n";
+  print $batchfh "Gl-Mem sust' BW                           ,Mbps     \n";
+  print $batchfh "Size of 1 input array (n_gs)              ,         \n";
+  print $batchfh "Firing interval/II (n_to)                 ,         \n";
+  print $batchfh "Total word operations per kernel (n_wops) ,         \n";
+  print $batchfh "Words per tuple (from GMEM)      (w_pt)   ,         \n";
+  print $batchfh "Size of problem (array size in words)     ,         \n";
+  print $batchfh "Word size in bits (w_s_bits)              ,         \n";
+  print $batchfh "Bytes per word (b_pw)                     ,         \n";
+  print $batchfh "Kernel Pipeline  Latency (k_pd)           ,         \n";
+  print $batchfh "CP of one PE                              ,GBops/sec\n";
+  print $batchfh "CP of one PE (Asymptotic)                 ,GBops/sec\n";
+  print $batchfh "Theoretical maximum PE scaling            ,         \n";
+  print $batchfh "Computation-Bound: CP_PE  x SCALE         ,GBops/sec\n";
+  print $batchfh "Bandwidth-Bound:   CI x BW                ,GBops/sec\n";
+  print $batchfh "Computational Intensity                   ,ByOP/ByTR\n";
+  print $batchfh "alutsKernel                               ,         \n";
+  print $batchfh "regsKernel                                ,         \n";
+  print $batchfh "bramKernel                                ,         \n";
+  print $batchfh "dspKernel                                 ,         \n";
+  print $batchfh "alutsBasePlat                             ,         \n";
+  print $batchfh "regsBasePlat                              ,         \n";
+  print $batchfh "bramBasePlat                              ,         \n";
+  print $batchfh "dspBasePlat                               ,         \n";
+
+  close($batchfh);
   
   for my $oneFile (@allFiles) {
     my $tDir = $oneFile."_build";    
@@ -273,7 +610,7 @@ if($batch) {
     system("cp $oneFile $tDir");
     chdir $tDir;
 
-    system("tybec.pl --i $oneFile --g --batchChild");
+    system("tybec.pl --i $oneFile --batchChild");
     chdir "..";
   }#for
   
@@ -286,168 +623,15 @@ if($batch) {
   
   my $end = Time::HiRes::gettimeofday();
   printf("\nThis batch build took %.2f seconds\n", $end - $start);
-  exit;
+  #exit;
 }
 
-# ============================================================================
-# Files and Dirs
-# ============================================================================
-
-#Root directory for TyBEC scripts
-my $TyBECROOTDIR = $ENV{"TyBECROOTDIR"};
-
-#make targe directories if not present
-make_path($outputBuildDir);
-make_path($outputRTLDir) if ($genRTL);
- 
-#open input TIRL file
-open(my $infh, "<", $inputFileTirl)
-  or die "Could not open file '$inputFileTirl' $!";
-
-#Create tokens.log (tokens parsed from TIRL are written this file)
-my $logFilename = "tokens.log";
-open(my $outfh, '>', "$outputBuildDir/$logFilename")
-  or die "Could not open file '$logFilename' $!";
-
-#batch file if this is a batchChild
-my $batchfh;
-if($batchChild) {
-  my $batchLogFilename = "batch.log";
-  open($batchfh, '>>', "$outputBuildDir/../../$batchLogFilename")
-      or die "Could not open file '$batchLogFilename' $!";
-}
-
-  
-#Read input TIRL contents; remove comments while reading
-my @lines = grep { /#.*/ } <$infh>; 
-
-# ----------------------------
-# Printing to LOG and STDOUT
-# ----------------------------
-my $tee = new IO::Tee(\*STDOUT, new IO::File(">$outputBuildDir/build.log"));        
-select $tee;        
-
-# ----------------------------
-# DOT.png
-# ----------------------------
-my $dotFilename;
-my $dotfh;
-if($dot) {
-  $dotFilename = "DOT.png";
-  open($dotfh, '>', "$outputBuildDir/$dotFilename")
-    or die "Could not open file '$dotFilename' $!";
-}
 
 # ============================================================================
-# Create DOT graph
-# ============================================================================
-our $dotGraph = GraphViz->new();
-
-# ============================================================================
-# Create Parser
-# ============================================================================
-my $parser = Parse::RecDescent->new($TirGrammarMod::grammar);
-
-# ============================================================================
-# Run TyBEC Pre-Processor  + GCC Pre-Processor
-# ============================================================================
-# This is ugly (having a macro parser as well as a GCC Pre-Processor.. TODO
-$parser->MACROS("@lines") or die "Parser Macro rule failed!"; 
-
-close $infh;
-
-my $tempMacExpFile = "temp.tirl";
-system("gcc -E -x c -P -C $inputFileTirl > $outputBuildDir/$tempMacExpFile");
-
-open(my $fh, "<", "$outputBuildDir/$tempMacExpFile")
-  or die "Could not open file '$tempMacExpFile' $!";
-
-# ============================================================================
-# Initializations
-# ============================================================================
-init(); #always parse
-
-# ============================================================================
-# Run parser
-# ============================================================================
-parse(); #always parse
-
-# ============================================================================
-# Analyse configuration and create verilog generator variables
-# ============================================================================
-analyze(); #always analyze
-
-# ============================================================================
-# Calculate and Print Cost 
-# ============================================================================
-estimate() if($estimate);
-
-# ============================================================================
-# Generate Verilog files
-# ============================================================================
-generate() if($genRTL);
-
-# ============================================================================
-# Post-processing and cleanup
-# ============================================================================
-
-#Print compile time and duration.
-my $end = Time::HiRes::gettimeofday();
-#print  "Build started at $end\n";
-printf ("Build took %.2f seconds\n", $end - $start);
-
-# write to LOG file here
-print $outfh Dumper(\%CODE); 
-
-#create DOT graph
-if($dot) {
-  print $dotfh $dotGraph->as_png;
-  
-  #if ($OSNAME eq 'MSWin32') {
-    system("cygstart ./TybecBuild/DOT.png") if($dot);
-  #else {#assume linux and use EYE to open
-  #  system("eog ./TybecBuild/DOT.png") if($dot);}
-  close $dotfh;
-}
-
-#close files
-close $fh;
-close $outfh;
-close $outfh;
-# remove temporary output file of GCC Pre-Processor
-#system("rm $tempMacExpFile");
-
-
-# ****************************************************************************
-#                              END OF SCRIPT
-# ****************************************************************************
-
-
-
-# ============================================================================
-#                   *****   SUB ROUTINES for tybec.pl *****
-# ============================================================================
-
-
-# ============================================================================
-# PARSE()
-# ============================================================================
-sub init {
-  print "\n";
-  print "=====================================\n";
-  print "       TARGET HARDWARE               \n";
-  print "=====================================\n";
-
-  print "Target node is\t: $targetNode\n";
-  print "Target board is\t: $targetBoard\n";
-  print "Target device is\t: $targetDevice\n";
-}
-
-# ============================================================================
-# PARSE()
+# PARSE() (and schedule)
 # ============================================================================
 sub parse {
-  @lines = grep { not /;.*/ } <$fh>; #remove comments while reading file
+  @lines = grep { not /;.*/ } <$fhinputpp>; #remove comments while reading file
   
   print "\n";
   print "=====================================\n";
@@ -455,895 +639,191 @@ sub parse {
   print "=====================================\n";
   
   $parser->STARTRULE("@lines") or die "Parser start rule failed!"; 
-  
-  #print "\n";
-  #print "================================\n";
-  #print "       Call Graph       \n";
-  #print "================================\n";
-  #print map "$_\n", @{$tree->draw_ascii_tree};
-    
 }
-
-# ============================================================================
-# ANALYZE
-# ============================================================================
-
-
-# ---------------------------------------------------
-# Helper function to add module to DOT graph
-# ---------------------------------------------------
-sub analyze_helper_dot_and_callGraph {
-  my $myKey           = shift (@_); #the function now  being analyzed (was called as child)
-  my $myName          = shift (@_); 
-  my $myType          = shift (@_); 
-  my $myRepeatCounter = shift (@_); 
-  
-  my $parentKey       = shift (@_); #the parent of this function
-  my $cGraphParent    = shift (@_); #call graph hash ref of parent, so that this
-                                    #function appends to it
-
-  #is this function a leaf function?
-  my $amIleaf        = $CODE{$myName}{leaf};
-  
-  if($amIleaf eq 'yes') {
-    return;}
-  else{
-    #check each instruction of this function, which may be a function call
-    foreach my $childKey (keys %{$CODE{$myName}{instructions}} ) {
-      #see if it is a function call instruction
-      if($CODE{$myName}{instructions}{$childKey}{instrType} eq 'funcCall') {
-        my $childName          = $CODE{$myName}{instructions}{$childKey}{funcName};
-        my $childRepeatCounter = $CODE{$myName}{instructions}{$childKey}{funcRepeatCounter};
-        my $childType          = $CODE{$myName}{instructions}{$childKey}{funcType};
-        my $isChildLeaf        = $CODE{$childName}{leaf};
-        
-        #add this child function to dot and call graph
-        $dotGraph->add_node ("$childName"."::$childRepeatCounter");
-        $dotGraph->add_edge ("$myName"."::$myRepeatCounter" => "$childName"."::$childRepeatCounter"
-                            , label => "$childType");   
-        $cGraphParent->{calls}{$childKey}{name} = $childName;
-        $cGraphParent->{calls}{$childKey}{type} = $childType;
-        
-        #call recursively on child function
-        #analyze_helper_dot_and_callGraph($key2 , $key, $cGraphParent->{calls}{$key2} );
-        analyze_helper_dot_and_callGraph( $childKey, 
-                                          $childName, 
-                                          $childType, 
-                                          $childRepeatCounter,
-                                          $myKey, 
-                                          $cGraphParent->{calls}{$childKey} );        
-      }#if funcCall
-    }#foreach
-  }#if($isChildLeaf eq 'no') {   
-}
-
-
-# ---------------------------------------------------
-# The analyze subroutine
-# ---------------------------------------------------
-sub analyze {
-
-  print "\n";
-  print "=====================================\n";
-  print "    NEW Analysing Configuration       \n";
-  print "=====================================\n";
-  
-  #--- launch exists
-  #-----------------------------------------
-  if (exists $CODE{launch}) { 
-    $dotGraph->add_node('launch');
-    $CODE{callGraph}{launch} = {};
-  }
-  else {
-    die "TyBEC: **Illegel Configuration Error**. No launch() found";}
-
-
-  #--- main called from launch?
-  #-----------------------------------------
-  if (exists $CODE{launch}{call2main}) {
-    $dotGraph->add_node('main');
-    $dotGraph->add_edge('launch' => 'main', label => "$CODE{launch}{call2main}{kIterSize}"); 
-    $CODE{callGraph}{launch}{calls}{main} = {};
-  }
-  else {
-    die "TyBEC: **Illegel Configuration Error**. No main() found";}
-  
-  #--- Build Call Graph and Dot Graph
-  #-----------------------------------------
-  foreach my $childKey (keys %{$CODE{main}{instructions}} ) {
-  
-    my $childName           = $CODE{main}{instructions}{$childKey}{funcName};
-    my $childRepeatCounter  = $CODE{main}{instructions}{$childKey}{funcRepeatCounter};
-    my $childType           = $CODE{main}{instructions}{$childKey}{funcType};
-    my $isChildLeaf         = $CODE{$childName}{leaf};
-
-    #add to dot graph and callGraph hash
-    $dotGraph->add_node("$childName"."::$childRepeatCounter");
-    $dotGraph->add_edge('main' => "$childName"."::$childRepeatCounter"
-                       , label => "$childType");                      
-    $CODE{callGraph}{launch}{calls}{main}{calls}{$childKey}{name} = $childName;
-    $CODE{callGraph}{launch}{calls}{main}{calls}{$childKey}{type} = $childType;
-
-    #call recursive function that does the same for each child function in main
-    analyze_helper_dot_and_callGraph( $childKey, 
-                                      $childName, 
-                                      $childType, 
-                                      $childRepeatCounter,
-                                      'main', 
-                                      $CODE{callGraph}{launch}{calls}{main}{calls}{$childKey} ); 
-  }#foreach
-
-  #-----------------------------------------
-  #--- Analyze configuration
-  #-----------------------------------------
-  
-  my $cgHash = $CODE{callGraph}{launch}{calls}{main}{calls}; #reduce clutter
-  my @cgHashKeys = keys %{$cgHash}; #keys of all functions called by main
-  
-  ### Main can call only one function
-  if(scalar @cgHashKeys > 1) {
-    die "TyBEC: **ERROR** main() can call only one function\n";}
-  
-  ### Check all possible valid configurations; if none found, error ###
-
-  #get the name and type of top function
-  $topFuncKey  = $cgHashKeys[0];
-  $topFuncType = $cgHash->{$topFuncKey}{type};
-  $topFuncName = $cgHash->{$topFuncKey}{name};
-  #$stages_pipe_top =  keys %{ $CODE{$pipeTop}{instructions} };   
-   
-  #Top function is PIPE
-  #==============================
-  if ($topFuncType eq 'pipe') {
-    #cPIPE: no further calls from a top level PIPE
-    if (!(exists $cgHash->{$topFuncKey}{calls}) ) {
-      $desConfigNew = 'cPipe';  # <<-------------- cPipe
-      #top function also the top PIPE function
-      $topPipeKey = $topFuncKey;
-      $NparPipes  = 1;
-    }
-      
-    #There are further calls from the top level PIPE
-    else {
-      #check EACH called function from top PIPE
-      foreach my $key (keys %{$cgHash->{$topFuncKey}{calls}} ) {
-        #preserve Type and Name to check if ALL called functions are of same type/name
-        state $prevType = 'null';
-        state $prevName = 'null';
-
-        #cPIPE: only calls to COMB from a top level PIPE
-        if  (  ($cgHash->{$topFuncKey}{calls}{$key}{type} eq 'comb') 
-            && ( ($prevType eq 'null') || ($prevType eq 'comb') ) ) {
-          $desConfigNew = 'cPipe'; # <<-------------- cPipe 
-          #top function also the top PIPE function
-          $topPipeKey = $topFuncKey;     
-        }
-        #only calls to PIPEs from inside a top level PIPE
-        elsif  (  ($cgHash->{$topFuncKey}{calls}{$key}{type} eq 'pipe') 
-            && ( ($prevType eq 'null') || ($prevType eq 'pipe') ) ) {
-            #symmetrical PIPElines (unrolled loop)
-            if(($prevName eq $cgHash->{$topFuncKey}{calls}{$key}{name}) || ($prevName eq 'null') ) {
-              $desConfigNew = 'cPipe_PipeS';} # <<-------------- cPipe_PipeS
-            #Asymmetric pipelines
-            else {
-              $desConfigNew = 'cPipe_PipeA';} # <<-------------- cPipe_PipeS
-            #store for use in generate()
-            $topCGpipeKey = $topFuncKey;
-            $topPipeKey = $topFuncKey;     
-            $NparPipes  = 1;
-        }#elsif  
-        
-        #check for cPipe_Par
-        #TODO: Should this be made obsolete in view of auto ILP extraction?
-        elsif ($cgHash->{$topFuncKey}{calls}{$key}{type} eq 'par') {
-          die "TyBEC: **ERROR** PAR inside a PIPE is now obsolete, as ILP is automatically 
-          extracted and scheduled.";
-        }
-  
-        #illegal configuration with a top-level PIPE function
-        else {
-          die "TyBEC: **ERROR** Illegal Configuration for a top-level PIPE function.";
-        }
-
-        $prevType = $cgHash->{$topFuncKey}{calls}{$key}{type};
-        $prevName = $cgHash->{$topFuncKey}{calls}{$key}{name};
-      }#foreach
-    }#else
-  }#if ($topFuncType eq 'pipe')
-  
-  #cSeq: top func SEQ, and no further calls from it
-  #====================================================
-  elsif ( ($topFuncType eq 'seq') &&  ~(exists $cgHash->{$topFuncKey}{calls}) ) {
-    $desConfigNew = 'cSeq'; }
-    
-  #cPar_XXX: Top function is PAR 
-  #===============================
-  elsif ($topFuncType eq 'par') {
-    #no child functions: ILLEGAL
-    if (!(exists $cgHash->{$topFuncKey}{calls}) ) {
-      die "TyBEC: **ERROR** Illegal configuration for a top-level PAR function. It must have children."; 
-    }
-    
-    #has child functions
-    else {
-      #check EACH called function from top PAR
-      foreach my $key (keys %{$cgHash->{$topFuncKey}{calls}} ) {
-        #preserve Type and Name to check if ALL called functions are of same type/name
-        state $prevType = 'null';
-        state $prevName = 'null';
-
-        #cPAR: only calls to COMB from a top level PAR **ILLEGAL**
-        if  (  ($cgHash->{$topFuncKey}{calls}{$key}{type} eq 'comb') 
-            && ( ($prevType eq 'null') || ($prevType eq 'comb') ) ) {
-          die "TyBEC: **ERROR** Illegal Configuration for a top-level PAR function.";}
-        
-        #only calls to PIPEs from inside a top level PAR
-        elsif  (  ($cgHash->{$topFuncKey}{calls}{$key}{type} eq 'pipe') 
-            && ( ($prevType eq 'null') || ($prevType eq 'pipe') ) ) {
-            
-            #symmetrical PIPElines (identical kernel for all pipes)
-            if(($prevName eq $cgHash->{$topFuncKey}{calls}{$key}{name}) || ($prevName eq 'null') ) {
-              $desConfigNew = 'cPar_PipeS'; # <<-------------- cPar_PipeS   
-              $topPipeKey = $key;
-            }#if
-            #Asymmetric pipelines: different kernels in each parallel pipeline (invalid)
-            else {
-              $desConfigNew = 'cPar_PipeA';} # <<-------------- cPar_PipeA
-        }#elsif  
-         
-        #**TODO**: Multiple CG pipelines
-        
-        #illegal configuration with a top-level PAR function
-        else {
-          die "TyBEC: **ERROR** Illegal Configuration for a top-level PAR function.";
-        }
-        $prevType = $cgHash->{$topFuncKey}{calls}{$key}{type};
-        $prevName = $cgHash->{$topFuncKey}{calls}{$key}{name};
-        $NparPipes++;
-      }#foreach
-      
-      #if we have decided that it is ATLEAST a cPar_PipeS or cPar_PipeA, we should check if
-      #these paralallel pipelines are themselves CG
-      my $desConfigNewTemp = $desConfigNew;
-      if  (  ($desConfigNew eq 'cPar_PipeS')
-          || ($desConfigNew eq 'cPar_PipeA') ) {      
-        
-        #loop over each child pipe calls, and if none of them has further
-        #function calls at all, it means we are already at the correct configuration
-        foreach my $key (keys %{$cgHash->{$topFuncKey}{calls}} ) {
-          state $prevType = 'null';
-          state $prevName = 'null';
-          if  (!(exists $cgHash->{$topFuncKey}{calls}{$key}{calls})
-              &&($prevType eq 'null')  ) {
-            #the current config is ok as none of the children has further children
-          }
-          #there is a further func call from at least one child pipe. 
-          #Check it it is a pipe or comb only
-          else {
-            #loop through each called function (grandchild) of child
-            foreach my $keyNested (keys %{$cgHash->{$topFuncKey}{calls}{$key}{calls}} ) {
-              state $prevTypeNested = 'null';
-              state $prevNameNested = 'null';
-              #check if it calls symmetric pipelines, different pipelines, or comb
-              
-              #check comb
-              if($cgHash->{$topFuncKey}{calls}{$key}{calls}{$keyNested}{type} eq 'comb') {
-                #no change to config
-              }#if
-              
-              #NOTE/TODO: This shoudl work ok for cPar_PipeS_PipeA, which is of interest
-              # but may fail for cPar_PipeA_PipeX, which has not been tested
-              elsif($cgHash->{$topFuncKey}{calls}{$key}{calls}{$keyNested}{type} eq 'pipe') {
-                #we've determined that child pipe has further pipe children. Now check if symm
-                #or asymm
-                # symm-case
-                if  (   $prevNameNested 
-                    eq  $cgHash->{$topFuncKey}{calls}{$key}{calls}{$keyNested}{name}) {
-                  #since nested pipes have same names, we have a symmetric pipes in the CG pipe
-                  #(which is not really what we are focusing on). 
-                  #the final config depends on the prev. derived partial config
-                  $desConfigNewTemp = 'cPar_PipeS_PipeS' if($desConfigNew eq 'cPar_PipeS');
-                  $desConfigNewTemp = 'cPar_PipeA_PipeS' if($desConfigNew eq 'cPar_PipeA');
-                }#if
-                #asymm-case
-                else {
-                  $desConfigNewTemp = 'cPar_PipeS_PipeA' if($desConfigNew eq 'cPar_PipeS');
-                  $desConfigNewTemp = 'cPar_PipeA_PipeA' if($desConfigNew eq 'cPar_PipeA');
-                  #save the name of the CG pipe in the symmetrical parallel CG pipe case, 
-                  #which is of interest
-                  $topCGpipeKey = $key;
-                  $topPipeKey = $key;
-                }
-              }#elsif
-              $prevTypeNested = $cgHash->{$topFuncKey}{calls}{$key}{calls}{$keyNested}{type};
-              $prevNameNested = $cgHash->{$topFuncKey}{calls}{$key}{calls}{$keyNested}{name};
-            }#foreach 
-          }#else
-          $prevType = $cgHash->{$topFuncKey}{calls}{$key}{type};
-          $prevName = $cgHash->{$topFuncKey}{calls}{$key}{name};
-        }#foreach PIPE in the top PAR
-      }#if the top PAR had pipes
-      #update designConfigNew if it has been updated in the previous code block
-      $desConfigNew = $desConfigNewTemp;
-    }#else: (has child functions)
-  #print "desConfigNew = $desConfigNew \n";
-  }#elsif: ($topFuncType eq 'par')
-  
-  #Unable to find a legal/known configuration
-  #------------------------------------------
-  else {$desConfigNew = 'ILLEGAL';}
-
-  print "TyBEC: $desConfigNew configuration\n";
- 
-  print "\n\n";
-  # print "=====================================\n";
-  # print " OBSOLETE  Analysing Configuration   \n";
-  # print "=====================================\n";
-  # 
-  # print "TyBEC: <<<<< $desConf configuration. >>>>>\n\n";
-  # print "TyBEC: xxxxx Kernel is Repeated $CODE{launch}{call2main}{kIterSize} times xxxxx\n\n";
-  
-  # ---------------------------------------------------
-  # Catch invalid configurations that were missed by parser
-  # ---------------------------------------------------
-  
-  # ---------------------------------------------------
-  # Process cPIPE and cPIPE_PAR configurations
-  # ---------------------------------------------------
-  
-  # size of hash of instructions in appropriate function will tell us the number of stages
-  
-  
-  #
-  # if cPIPE or cPIPE_PARs
-  # if ( ($desConf eq 'cPIPE') || ($desConf eq 'cPIPE_PARs') )
-  # {
-  #   print "TyBEC: $pipeTop is the top level pipeline module in the configuration.\n";
-  #   print "TyBEC: $stages_pipe_top stages in the $pipeTop pipeline.\n";
-  #   print "TyBEC: $CODE{$pipeTop}{instrCount} instructions in $pipeTop \n";
-  # 
-  #   # add tree elements
-  #   #$childL1->name("$pipeTop"."|pipe");
-  #   #$mainTree->add_daughter($childL1);
-  # 
-  #   # check if there are PAR blocks, and if so, which ones
-  #   if ($desConf eq 'cPIPE_PARs')
-  #   {
-  #     print "TyBEC: $CODE{$pipeTop}{insCntrFcall} of these are functional call instructions \n";
-  # 
-  #     #iterate over all instructions called in top level pipe, and list par functions called:
-  #     foreach my $key ( keys %{$CODE{$pipeTop}{instructions}} )
-  #     {
-  #       # if instruction was a function call instruction
-  #       if ($CODE{$pipeTop}{instructions}{$key}{instrType} eq "funcCall")
-  #       {
-  #         print "TyBEC: $key is called from $pipeTop \n"; 
-  #         #$childL1->new_daughter->name($key."|par");
-  #       }#if
-  #     }#foreach
-  #   }#if
-  # }#if
-  
-  # --------------------------------------------------------------------
-  # Process cPAR_PIPEs and cPAR_PIPEs_PARs configurations
-  # --------------------------------------------------------------------
-  # elsif ( ($desConf eq 'cPAR_PIPEs_PARs') || ($desConf eq 'cPAR_PIPEs') )
-  # {
-  #   print "TyBEC: $parTop is the top level parallel module in the configuration\n";
-  #   print "TyBEC: $pipeSecond pipeline is repeated $Npipes times in $parTop \n";
-  #   print "TyBEC: $CODE{$pipeSecond}{instrCount} instructions in $pipeSecond \n";
-  # 
-  # 
-  #   # check if there are PAR blocks, and if so, which ones
-  #   # check if there are PAR blocks in the PIPE, and if so, which ones
-  #   if ($desConf eq 'cPAR_PIPEs_PARs')
-  #   {
-  #     print "TyBEC: $CODE{$pipeSecond}{insCntrFcall} of these are functional call instructions \n";
-  # 
-  #     #iterate over all instructions called in top level pipe, and list par functions called:
-  #     foreach my $key ( keys %{$CODE{$pipeSecond}{instructions}} )
-  #     {
-  #       # if instruction was a function call instruction
-  #       if ($CODE{$pipeSecond}{instructions}{$key}{instrType} eq "funcCall")
-  #       {
-  #         print "TyBEC: $key is called from $pipeSecond \n";
-  #         #$childL3->new_daughter->name($key);
-  #       }#if
-  #     }#foreach
-  #   }#if
-  # 
-  #   # add tree elements
-  #   #$childL1->name("$parTop"."|par");
-  #   #foreach my $i (0..$Npipes-1) 
-  #   #  {
-  #   #    $childL1->new_daughter->name("$pipeSecond"."|pipe"."|$i");
-  #   # }
-  #   #$mainTree->add_daughter($childL1);
-  # }#elsif
-  
-  # --------------------------------------------------------------------
-  # Check for REPEAT block 
-  # --------------------------------------------------------------------
-  
-  # ------------------------------------
-  # Print Configuration Tree
-  # ------------------------------------
-  #print "\n";
-  #print "================================\n";
-  #print "       Configuration Tree       \n";
-  #print "================================\n";
-  #print map "$_\n", @{$launchTree->draw_ascii_tree};
-  
-  # ------------------------------------
-  # -- Analyze memory execution type 
-  # ------------------------------------
-
-  # Memory execution model defines three types, and cost model
-  # is dependent on them
-  
-  # Types:
-  # ------
-  #   A   : HOST streams
-  #         Data transferred between
-  #         host and device between
-  #         each NDRange iteration (host streams)
-  #   B   : GLOBAL (Device DRAM) streams
-  #         Data transferred between
-  #         device-DRAM (global-
-  #         memory) and device
-  #         between each NDRange
-  #         iteration
-  #   C   : Local streams 
-  #         No data transferred to/from
-  #         the device between each
-  #         work-group iteration.
-  
-  
-  # NOTE: The assumption is that all streams must be of the same type, 
-  #       that is, sourced/sinked to the same type of memory. This is an
-  #       unnatural constraint, which should be removed later (TODO)
-  
-  #loop over stream objects, confirm all are of same type, and then specify memory-exec type
-#my $designAddrSpace;
-#foreach my $key (keys %{$CODE{launch}{stream_objects}}) {
-#    $designAddrSpace = $CODE{launch}{stream_objects}{$key}{memConnAddrSpace};
-#    print "key = $key designAddrSpace = $designAddrSpace \n";
-#    state $prev = $designAddrSpace;#initialize to first value
-#    if ($designAddrSpace != $prev) {
-#      die "**ERROR**: All streams must be connected to the same type (address space) 
-#            of memory. Non-uniform streams are currently not supported.\n";
-#    }
-#  $prev = $designAddrSpace;
-#}#foreach
-
-  my $designAddrSpace = 1;
-
-  
-  $CODE{launch}{memExecModelType} = 'A' if ($designAddrSpace == 5); #host streams
-  $CODE{launch}{memExecModelType} = 'B' if ($designAddrSpace == 1); #device-DRAM streams
-  $CODE{launch}{memExecModelType} = 'C' if ($designAddrSpace == 2); #local streams
-  
-  print "\n";
-  print "================================\n";
-  print "       Memory Execution Model   \n";
-  print "================================\n";
-  print "TyBEC: This is a Type $CODE{launch}{memExecModelType} design.\n";
-}#analyze
-
 
 # ============================================================================
 # ESTIMATE()
 # ============================================================================
 sub estimate {
-  
-  print "\n";
   print "============================================================================\n";
-  print " THROUGHPUT ESTIMATES       \n";
+  print " Running the Cost Model (Performance and Resource Estimates)       \n";
   print "============================================================================\n\n"; 
+ 
+  print "Target node is   : $targetNode\n";
+  print "Target board is  : $targetBoard\n";
+  print "Target device is : $targetDevice\n\n"; 
   
-  #top function name is key
-  (my $topPipeName = $topPipeKey) =~ s/\.\d+//;
-
-  # maximum frequency estimate
-  my $maxFreq = (1/$CODE{launch}{cost}{PropDelay}) * 1000;
-    # in MHz
-
-  #The variables that make up the expression, 
-  #-------------------------------------------
-    # using the same variable names as used in documentation...
+  my $topKernel = $CODE{main}{topKernelName};
+  $topKernel =~ s/\_\d+$//;
   
-  my $mem_exec_type = $CODE{launch}{memExecModelType};
-  my $w_s = 32;
-    #word size in bits  
-    #NOTE: All bandwidths have basic unit of MWords
-    #TODO: this is VERY ugly.... the word-size should be derived from data types
-
-  my $h_pb  = ($HardwareSpecs::boards{$main::targetBoard}{hostBW_Peak_Mbps}*1e6)/$w_s;     
-    #Host peak bandwidth: TODO.. Update!
-  my $rho_h = 1.0;                                                              
-    #Host RHO factor. TODO
-  my $g_pb = ($HardwareSpecs::boards{$main::targetBoard}{boardRAMBW_Peak_Mbps}*1e6)/$w_s;  
-    #Global-mem (Device DRAM) peak bandwidth
-  my $rho_g = 'null';
-    #device-DRAM RHO factor. TODO
-  
-  # Since sustained bandwidth is already calculated in the parsed stream objects, 
-  # we simply use them, and hence do not need to know peak BW + rho factor.
-  # Also, we assume all streams are uniform, and so the sustained bandwidth is 
-  # used from any stream object
-  # TODO: host sust-BW MUST be udpated
-  my $h_sb  = $h_pb * $rho_h;
-    #Host sustained bandwidth
-  my $g_sb_wps = ($CODE{launch}{cost}{sustBW_Mbps}*1e6)/$w_s;  
-    #Global-mem (Device DRAM) sustained bandwidth, in words-per-sec
-  my $g_sb_Bps = $g_sb_wps * ($w_s/8); #in bytes-per-sec
-  
-  my $n_gs  = $CODE{macros}{NLinear};
-    # global size (total number of work-items processing per work-unit)
-  
-  my $k_nl = $CODE{macros}{NLanes};
-    #number of parallel lanes of top level pipeline kernel
-    #TODO: This is should be extracted from design config., rather than require macro for it
-
-    #my $w_pt  = $CODE{$topPipeName}{wordsPerTupleFromOrToMemoryObjects}; 
-  my $w_pt  = $CODE{launch}{totalWordsToFromGmemPerStep}/$k_nl;
-    # Words per tuple(input AND output), required for *each* work-item execution
-    # on the TOP level pipeline
-    # ONLY considers the words to/from Globam-memory
-    # This excludes any offset streams, as they are internally generated and do not effect
-    # the traffic to memory_objects
-    # I am also exclusing streams from CONSTANT memories as they can be expected
-    # to be from on-chip memories.
-    #note that this wordsPerTuple will accumulate streams across multiple PEs in case
-    #of PE scaling. So this will need to be SCALED DOWN to get the number of wordsPerTuple
-    #one ONE PE
-
-  my $n_wu  = $CODE{macros}{NKIter};
-    # Number of times kernel executed over all NGS work-items
-
-  my $k_pd = $CODE{$topPipeName}{nPipeStages}; 
-    #pipeline depth of top-level kernel pipeline
-
-  my $f_d = $maxFreq * (1e6) ;
-    #device operating frequency
-
-  my $n_to = 1;
-    #cycles per average primitive instruction (word-operation)
-
-  my $n_i = 1;
-    #instructions per PE-stage
-
-  my $d_v = 1;
-    #degree of vectorization per PE
-
-  my $n_off = 0 ; #TODO
-  $n_off = $CODE{$topPipeName}{maxPositiveOffset} 
-    if (exists $CODE{$topPipeName}{maxPositiveOffset});
-  # Maximum offset of any stream
-  # NOTE: This parameter only looks at + streams, as they effect throughput 
-  #       It  assumes that all off-set streams are defined in the 
-  #       top-level pipeline, which may or may not be a CG pipeline
-  #       This is an artificial (simplifying) constraint. TODO
-  
-  print "The value of variables that make up the EWUT expression:\n";
-  print "--------------------------------------------------------\n";
-  print "mem_exec_type = $mem_exec_type\n";
-  print "n_off = $n_off \n";
-  print "h_pb  = $h_pb  \n"; 
-  print "h_sb  = $h_sb  \n";
-  print "g_pb  = $g_pb  \n";  
-  print "g_sb_wps  = $g_sb_wps  \n";      
-  print "l_sb  = inf   \n";
-  print "n_gs  = $n_gs  \n";
-  print "w_pt  = $w_pt  \n";
-  print "n_wu  = $n_wu  \n";
-  print "k_pd  = $k_pd  \n";
-  print "f_d   = $f_d   \n";
-  print "n_to  = $n_to  \n";
-  print "n_i   = $n_i   \n";
-  print "k_nl  = $k_nl  \n";
-  print "d_v   = $d_v   \n";
-  print "w_s   = $w_s   \n";
-  
-  # EWUT:
-  #------
-  # See project report v1.1 for the expressions 
-  
-  #the two expressions inside the "max" in the EWUT expressions
-  my $timeKernelExecution  = ($n_gs*$w_pt*$n_to*$n_i) / ($f_d*$k_nl*$d_v);
-  my $timeGmemStreams = ($n_gs*$w_pt) / ($g_sb_wps);
-
-  #the max of the above two wins (constraints) the overall throughput
-  my $deisgnLimitedBy;
-  my $limitingTime;
-  if($timeKernelExecution >=  $timeGmemStreams) {
-    $deisgnLimitedBy = 'Compute-bound';
-    $limitingTime = $timeKernelExecution;
-  }
-  else {
-    $deisgnLimitedBy = 'Memory-bound';
-    $limitingTime = $timeGmemStreams;
-  }
-  
-  #filling the pipeline latency
-  my $timeFillPipe = $k_pd / $f_d;
-  
-  #filling offset buffers latency
-  my $timeFillOffsets = $n_off / $g_sb_wps;
-  
-  #host streams latency (may or may not be repeated across kernel calls)
-  my $timeHostStreams = ($n_gs * $w_pt) / ($h_sb);
-  
-  #time for 1-WU and N-WU (not used for ewut, but used later for BW estimates)
-  my $t_1wu;
-  my $t_nwu;
-  
-  #time for N WU
-  
-  #Now do mem-exec-type-specific calculations:
-  my $ewut;
-  if ($mem_exec_type eq 'A'){
-    $t_1wu =  $timeHostStreams 
-           +  $timeFillOffsets 
-           +  $timeFillPipe 
-           +  $limitingTime;
-    $t_nwu = $n_wu * $t_1wu;
-    $ewut = 1 / $t_1wu;                
-  }
-  elsif ($mem_exec_type eq 'B'){
-    $t_1wu =  ($timeHostStreams/$n_wu) 
-           +  $timeFillOffsets 
-           +  $timeFillPipe 
-           +  $limitingTime;
-    $t_nwu = $n_wu * $t_1wu;
-    $ewut = 1 / $t_1wu;
-  }
-  else {
-    $t_1wu =  ($timeHostStreams/$n_wu) 
-           +  $timeFillOffsets 
-           +  $timeFillPipe 
-           +  $timeKernelExecution;
-    $t_nwu = $n_wu * $t_1wu;
-    $ewut = 1 / $t_1wu;
-  }
-  
-  print "\nEWUT:\n";
-  print "----\n";
-  print "$ewut Work-Units per second\n";
-  print "** $deisgnLimitedBy ** design\n";
-  
-
-  # CPWI (Clocks per Work Instance):
-  #--------------------------------
-  my $execCycleEstSingle 	=  (($n_gs + $k_pd)* $n_to)/$k_nl;
-  print "\nCPWI:\n";
-  print "----\n";
-  print "$execCycleEstSingle cycles-per-work-instance\n";
-  
-  
-  
+  my $ninputs   = $CODE{$topKernel}{ninputs};
+  my $noutputs  = $CODE{$topKernel}{noutputs};
+  my $w_pt      = $ninputs + $noutputs;
+  print ">>>>>>>>>>>>>>>>>> $ninputs, $noutputs, $w_pt\n";
+    #Words per tuple from GMEM (in and out) TODO: This should not be hardwired  
+  my $dtype     = $CODE{$topKernel}{synthDtype};
+  (my $dWidthBits= $dtype) =~ s/\D+//;
+  my $dWidthByes = $dWidthBits/8;
   
   print "\n";
-  print "============================================================================\n";
-  print " REQUIRED BANDWIDTH ESTIMATE \n";
-  print "============================================================================\n\n";
+  print "----------------------------------------------------------------------------\n";
+  print " BANDWIDTH ESTIMATES \n";
+  print "----------------------------------------------------------------------------\n";
+
+  #device operating frequency
+  my $f_mhz = (1/$CODE{main}{resource}{propDelay}) * 1000;
+  roundOne(\$f_mhz);
+  my $f_hz  = $f_mhz * (1e6) ;
+  print "TyBEC: f  = $f_mhz MHz $f_hz Hz\n";
   
-  # Host  / GMem Bandwidth Estimate
-  #--------------------------------------------
-  #                           bits transported b/w device and global_mem/host/local mem (dep on type)
-  # Requred  bandwidth = -----------------------------------------------------------------------------
-  #                             total execution time
-  #
-  # 
-  # bits b/w host-device = number of streams x size of each stream x width of each stream
+  #host and gmem sustained bandwidth
+  my $h_pb_Mbps= ($HardwareSpecs::boards{$main::targetBoard}{hostBW_Peak_Mbps});     
+  my $rho_h   = 1.0;                                                              
+  my $h_sb_Mbps= $h_pb_Mbps * $rho_h;
   
+  my $g_pb_Mbps= $HardwareSpecs::boards{$main::targetBoard}{boardRAMBW_Peak_Mbps};  
+  my $rho_g   = 0.57; #TODO:: link this to mp-stream... this is a typical value for strided, non-vectorized access
+  my $g_sb_Mbps= $g_pb_Mbps * $rho_g;
+  my $g_sb_MBps= $g_pb_Mbps * $rho_g / 8;
+  roundOne(\$g_sb_MBps);
   
-  
-  
-  #pick up bits transported between device-host, or device-globalmem, depending on mem-exec type
-  my $bitsFromOutsidePerWU ;
-  my $bitsToOutsidePerWU   ;
-  my $bitsOutsideTotalPerWU;
-  if($CODE{launch}{memExecModelType} eq 'A') {
-    $bitsFromOutsidePerWU    = $CODE{launch}{hostComm}{from};
-    $bitsToOutsidePerWU      = $CODE{launch}{hostComm}{to};
-    $bitsOutsideTotalPerWU   = $CODE{launch}{hostComm}{toFrom};
-  }    
-  elsif($CODE{launch}{memExecModelType} eq 'B') {
-    $bitsFromOutsidePerWU    = $CODE{launch}{gMemComm}{from};
-    $bitsToOutsidePerWU      = $CODE{launch}{gMemComm}{to};
-    $bitsOutsideTotalPerWU   = $CODE{launch}{gMemComm}{toFrom};
-  }
-  
-  # required bandwidth to/from host or GMEM ("outside" data)
-  my $estOutsideTotalBW     = ($bitsOutsideTotalPerWU / $t_nwu) * (1/1e6); #Mbps
-  my $estOutsideTotalBW_Bps = $estOutsideTotalBW/8; #MBps
-  my $estFromOutsideBW      = ($bitsFromOutsidePerWU / $t_nwu) * (1/1e6);
-  my $estToOutsideBW        = ($bitsToOutsidePerWU / $t_nwu) * (1/1e6);  
-  
-  
-  #calculating both, but only one will apply depending on mem exec type
-  my $hostBwPercent=100*( ($estOutsideTotalBW * 1e6) / $h_sb);  
-  my $gMemBwPercent=100*( ($estOutsideTotalBW * 1e6) / $g_sb_wps);
-  
-  if($CODE{launch}{memExecModelType} eq 'A') {
-    print "------------------------------------------------------------------\n";
-    print "HOST<-->DEVICE BANDWIDTH REQUIREMENT for TYPE A MEMORY EXECUTION--\n"; 
-    print "------------------------------------------------------------------\n";
-    print "$estOutsideTotalBW\t Mbits/s\n";
-    print "$estOutsideTotalBW_Bps\t MBytes/s\n";
-    print "\nwhere:\n";
-    print "$bitsFromOutsidePerWU bits\t host   --> device\n";
-    print "$bitsToOutsidePerWU bits\t device --> host\n";
-    print "$t_nwu\tsec net execution time\n";
-    
-    #if applicable
-    print "\n";
-    print "\nHost Bandwidth Utilization Percentage:\n";
-    print "---------------------------------------\n";
-    print "Host BW percentage utilization =  $hostBwPercent\n";
-    print "\n";
-    print "Host interface is $HardwareSpecs::boards{$targetBoard}{hostInterface}\n";
-    
-    if($hostBwPercent >= 100) {
-      print "*NOTE*: Estimate of required host bandwidth exceeds available bandwidth. This means design is IO-bound.\n";
-    }
-  }
-  
-  elsif($CODE{launch}{memExecModelType} eq 'B') {
-    print "------------------------------------------------------------------\n";
-    print "DEVICE<-->DRAM BANDWIDTH REQUIREMENT for TYPE B MEMORY EXECUTION--\n"; 
-    print "------------------------------------------------------------------\n";
-    print "$estOutsideTotalBW\t Mbits/s\n";
-    print "$estOutsideTotalBW_Bps\t MBytes/s\n";
-    print "\nwhere:\n";
-    print "$bitsFromOutsidePerWU bits\t DRAM   --> device\n";
-    print "$bitsToOutsidePerWU   bits\t device --> DRAM\n";
-    print "$t_nwu\tsec net execution time\n";
-    
-    #if applicable
-    print "\n";
-    print "\nDRAM (Global) Bandwidth Utilization Percentage:\n";
-    print "---------------------------------------\n";
-    print "DRAM (Global Memory) BW percentage utilization =  $gMemBwPercent\n";
-    print "\n";
-    print "DRAM interface is $HardwareSpecs::boards{$targetBoard}{boardRAM_type}\n";
-    
-    if($gMemBwPercent >= 100) {
-      print "*NOTE*: Estimate of required host bandwidth exceeds available bandwidth. This means design is IO-bound.\n";
-    }
-  }
-  
+
+  print "TyBEC: host peak_Mbps  = $h_pb_Mbps Mbps\n";
+  print "TyBEC: host sust Mbps  = $h_sb_Mbps Mbps\n";
+  print "TyBEC: mem  peak Mbps  = $g_pb_Mbps Mbps\n";
+  print "TyBEC: mem  sust Mbps  = $g_sb_Mbps Mbps\n";
   
   print "\n";
-  print "============================================================================\n";
-  print " RESOURCE COST ESTIMATES  (before updates from generation)    \n";
-  print "============================================================================\n\n";
-  
-  print "The Estimated Cost of the Processing Element (excluding base platform) is as follows:\n";
-  print Dumper(\%{$CODE{launch}{cost}});
-  
-  my $alutsPercentKernel = 100*($CODE{launch}{cost}{ALUTS}   / $HardwareSpecs::devices{$targetDevice}{ALUTS});
-  my $regsPercentKernel  = 100*($CODE{launch}{cost}{REGS}    / $HardwareSpecs::devices{$targetDevice}{REGS});
-  my $m20kPercentKernel  = 100*($CODE{launch}{cost}{M20Kbits}/ $HardwareSpecs::devices{$targetDevice}{M20Kbits});
-  my $dspPercentKernel   = 100*($CODE{launch}{cost}{DSPs}    / $HardwareSpecs::devices{$targetDevice}{DSPs});
+  print "----------------------------------------------------------------------------\n";
+  print " RESOURCE ESTIMATES (Kernel & Shell) \n";
+  print "----------------------------------------------------------------------------\n";
 
-  #TODO: data-type hardwired here (LAZY!) 
-  #TODO: output streams from the top assumed to be = 1 (as AOCL+HDL has this limitation)
-  #      and so to get input streams I just take away 1 from the total streams (words per tuple). This is a hack!
-  my $inputGmemStreams = $w_pt-1;  #number of input streams of ONE PE
-  my $costBasePlat_ref = Cost::costBasePlatform ( 'ui32' , $inputGmemStreams, 1 , $k_nl);
-  my %costBasePlat = %$costBasePlat_ref;
+  my $alutsKernel = $CODE{main}{resource}{aluts};
+  my $regsKernel  = $CODE{main}{resource}{regs} ;
+  my $bramKernel  = $CODE{main}{resource}{bram} ;
+  my $dspKernel   = $CODE{main}{resource}{dsps} ;
+
+  my $alutsPercentKernel  = 100*($alutsKernel/ $HardwareSpecs::devices{$targetDevice}{aluts});
+  my $regsPercentKernel   = 100*($regsKernel / $HardwareSpecs::devices{$targetDevice}{regs});
+  my $bramPercentKernel   = 100*($bramKernel / $HardwareSpecs::devices{$targetDevice}{bram}  );
+  my $dspPercentKernel    = 100*($dspKernel  / $HardwareSpecs::devices{$targetDevice}{dsps});
+  roundTwo(\$regsPercentKernel );
+  roundTwo(\$dspPercentKernel  );
+  roundTwo(\$alutsPercentKernel);
+  roundTwo(\$bramPercentKernel );
    
   #read in cost of base platform from hash returned from cost function
-  my $alutsPercentBasePlat = 100* ($costBasePlat{ALUTS}   / $HardwareSpecs::devices{$targetDevice}{ALUTS})    ;
-  my $regsPercentBasePlat  = 100* ($costBasePlat{REGS}    / $HardwareSpecs::devices{$targetDevice}{REGS})     ;
-  my $m20kPercentBasePlat  = 100* ($costBasePlat{M20Kbits}/ $HardwareSpecs::devices{$targetDevice}{M20Kbits}) ;
-  my $dspPercentBasePlat   = 100* (0                      / $HardwareSpecs::devices{$targetDevice}{DSPs})     ;  
+  my $inputGmemStreams = $w_pt-1;  #number of input streams of ONE PE
+  my $costBasePlat_ref = Cost::costBasePlatform ( 'ui32' , $inputGmemStreams, 1 , 1);
+  my %costBasePlat = %$costBasePlat_ref;
+
+  my $alutsBasePlat= $costBasePlat{aluts};
+  my $regsBasePlat = $costBasePlat{regs} ;
+  my $bramBasePlat = $costBasePlat{bram} ;
+  my $dspBasePlat  = 0                   ;
+  
+  my $alutsPercentBasePlat = 100* ($alutsBasePlat/ $HardwareSpecs::devices{$targetDevice}{aluts});
+  my $regsPercentBasePlat  = 100* ($regsBasePlat / $HardwareSpecs::devices{$targetDevice}{regs}) ;
+  my $bramPercentBasePlat  = 100* ($bramBasePlat / $HardwareSpecs::devices{$targetDevice}{bram}) ;
+  my $dspPercentBasePlat   = 100* ($dspBasePlat  / $HardwareSpecs::devices{$targetDevice}{dsps}) ;
+  roundTwo(\$alutsPercentBasePlat);
+  roundTwo(\$regsPercentBasePlat );
+  roundTwo(\$bramPercentBasePlat );
+  roundTwo(\$dspPercentBasePlat  );  
   
   #accumulate these costs into the total along with the Kernel costs
+  my $alutsTotal = $alutsBasePlat+ $alutsKernel;
+  my $regsTotal  = $regsBasePlat + $regsKernel ;
+  my $bramTotal  = $bramBasePlat + $bramKernel ;
+  my $dspTotal   = $dspBasePlat  + $dspKernel  ;
+  
   my $alutsPercentTotal= $alutsPercentKernel+ $alutsPercentBasePlat;
   my $regsPercentTotal = $regsPercentKernel + $regsPercentBasePlat ;
-  my $m20kPercentTotal = $m20kPercentKernel + $m20kPercentBasePlat ;
+  my $bramPercentTotal = $bramPercentKernel + $bramPercentBasePlat ;
   my $dspPercentTotal  = $dspPercentKernel  + $dspPercentBasePlat  ;
   
-  print "---------------------------------------------\n";
-  print "Resource Utilization Percentage - TOTAL\n";
-  print "---------------------------------------------\n";
-  print "alutsPercentTotal  = $alutsPercentTotal  \n";
-  print "regsPercentTotal   = $regsPercentTotal   \n";
-  print "m20kPercentTotal   = $m20kPercentTotal   \n";
-  print "dspPercentTotal    = $dspPercentTotal    \n";
   print "\n";
-  print "-----------------------------------------------\n";
-  print "Resource Utilization Percentage - KERNEL ONLY\n";
-  print "-----------------------------------------------\n";
-  print "alutsPercentKernel  = $alutsPercentKernel  \n";
-  print "regsPercentKernel   = $regsPercentKernel   \n";
-  print "m20kPercentKernel   = $m20kPercentKernel   \n";
-  print "dspPercentKernel    = $dspPercentKernel    \n";
-  print "\n";
-  print "Target device is $targetDevice\n";
-  print "\n";
-  
-  if  ( ($alutsPercentTotal >= 100) 
-      ||($regsPercentTotal  >= 100)
-      ||($m20kPercentTotal  >= 100)
-      ||($dspPercentTotal   >= 100) )
-  {
-    print "WARNING: Estimate of required resources exceeds available resources\n";
-    $designFail = 1;
-  }  
-  
-  print "\n";
-  print "============================================================================\n";
-  print " NEW: ROOFLINE ANALYSIS                                                           \n";
-  print "============================================================================\n\n";
-  
-  #pre-requisite parameters for ROOFLINE:
-  #---------------------------------------
-  
-  # already evaluated
-  # w_pt   = Words per tuple (input and output). Already available
-  # $l_pi = $n_to = cycles per (word)  instruction. In the typical (and asymptotic) case, it will be 1. Already available.
-  #                  can also refer to it as pipeline-stage-latency
-  
-  # f_d    = the throughput of the kernel (cycles per second). Already available
-  
-  
-  # b_pw   = bytes per word (for memory bandwidth, as well as for operations)
-  my $b_pw = $w_s/8; #bytes-per-word is word-size (in bits) / 8
-  # n_wops =  Number of WORD operations performed for each execution of the kernel (i.e., for each w_pt words)
-  #           When the pipeline is full, these many operations are performed EACH CYCLE  (given n_i = 1)
-  # n_bops =  Same as n_wops,only in bytes
-  my $n_wops = $glComputeInstCntr;
-  my $n_bops = $n_wops * $b_pw;
-  
-  my $cp_pe_Bops;        #The Computational Power of one PE (in byte-ops / sec)
-  my $cp_pe_GBops;       #The Computational Power of one PE (in Giga-byte-ops / sec)
-  my $thisScaling;       #Number of times PE is repeated/scaled 
-  
-  my $cp_pe_Bops_s;      #The Computational Power of scaled (S) PEs (for THIS design)
-  my $cp_pe_GBops_s;     #The Computational Power of scaled (S) PEs - GBops
-  
-  my $cp_pe_Bops_smax;      #The Computational Power of PEs scaled to theoretical MAX
-  my $cp_pe_GBops_smax;     #The Computational Power of scaled (S) PEs - GBops
-  
-  my $ci;                #Computational Intensity (Byte-operations per byte from/to memory)         
-  my $bw;                #Bandwidth (bytes/sec) from/to memory. This is the memory used for ci
-  my $bw_G;              #Bandwidth (Gbytes/sec) from/to memory. This is the memory used for ci
-  my $ci_bw;             #CI x BW
-  my $peakTheoBW_GBps;   #Peak Theoretical Bandwidth of target Device+Memory (GB-per-sec)
-  my $p_bops;            #Final estimated performance (byte-operations per second)
-  my $xATcpRoof;         #value of CI and CP-ROOF (cp_pe_GBops_s)
-  
-  my $maxScaling;        #depending on the available resources, what it the maximum possible "scaling"
-                         #i.e., how many times can we repeat the kernel pipeline
-  
-  print "TyBEC: Compute operations (word) per work-item (kernel) = $n_wops\n";
-  print "TyBEC: Words to/from memory per work-item               = $w_pt\n";
+  print "::KERNEL::\n";
+  print "TyBEC: aluts = $alutsKernel ($bramPercentKernel %)\n";
+  print "TyBEC: regs  = $regsKernel  ($alutsPercentKernel %)\n";
+  print "TyBEC: bram  = $bramKernel  ($dspPercentKernel %)\n";
+  print "TyBEC: dsp   = $dspKernel   ($regsPercentKernel %)\n";
 
-
-  #Computational Power of 1 PE (baseline CP Roof)
-  #----------------------------------------------
-  #CP_PE (word-ops/sec) = ( (cycles/sec) / pipeline-stage-latency) * (word-ops-per-kernel)
-  #CP_PE (byte-ops/sec) = ( (cycles/sec) / pipeline-stage-latency) * (word-ops-per-kernel) * (bytes/word)
-  $cp_pe_Bops = ($f_d / $n_to) * $n_wops * $b_pw * $d_v;
+  print "\n";
+  print "::SHELL::\n";
+  print "TyBEC: aluts = $alutsBasePlat ($alutsPercentBasePlat %)\n";
+  print "TyBEC: regs  = $regsBasePlat  ($regsPercentBasePlat %)\n";
+  print "TyBEC: bram  = $bramBasePlat  ($bramPercentBasePlat %)\n";
+  print "TyBEC: dsp   = $dspBasePlat   ($dspPercentBasePlat %)\n";
   
-  #my $timeKernelExecution  = ($n_gs*$w_pt*$n_to*$n_i) / ($f_d*$k_nl*$d_v);
+  print "\n";
+  print "::TOTAL::\n";
+  print "TyBEC: aluts = $alutsTotal ($alutsPercentTotal %)\n";
+  print "TyBEC: regs  = $regsTotal  ($regsPercentTotal %)\n";
+  print "TyBEC: bram  = $bramTotal  ($bramPercentTotal %)\n";
+  print "TyBEC: dsp   = $dspTotal   ($dspPercentTotal %)\n";
+  
+  print "\n";
+  print "----------------------------------------------------------------------------\n";
+  print " ROOFLINE ANALYSIS                                                           \n";
+  print "----------------------------------------------------------------------------\n";
+  
+  #ASSUMPTION: that any input array can be used as represengint size (and data type) of all
+  #input arrays
+  
+  my $n_wops  = $glComputeInstCntr;
+  my $w_s_bits= $dWidthBits;
+  my $b_pw    = $w_s_bits/8;
+  my $n_gs    = $main::CODE{main}{bufsize}; #Size of array
+  my $n_to    = $CODE{main}{performance}{afi}; 
+    #Latency per instruction, or Firining Interval, or (loop) Initiation Interval
+  my $d_v     = 1; 
+    #TODO: This shouldnt be hardwired. Also, with tybec-17, this should be OBSOLETE
+  my $k_pd    = $CODE{main}{performance}{lat}; 
+    #The kernel depth (effectively, the overall latency): TODO: not hardwired!
 
-  $cp_pe_GBops = $cp_pe_Bops * 1e-9;
-  print "TyBEC: Computational Power (CP) of one PE = $cp_pe_GBops GBops/sec\n";
+  print "TYBEC: Size of 1 input array (n_gs)              = $n_gs\n";
+  print "TYBEC: Firing interval/II (n_to)                 = $n_to\n";
+  print "TYBEC: Total word operations per kernel (n_wops) = $n_wops\n";
+  print "TYBEC: Words per tuple (from GMEM)      (w_pt)   = $w_pt\n";
+  print "TYBEC: Size of problem (array size, words)       = $n_gs\n";
+  print "TYBEC: Word size in bits (w_s_bits)              = $w_s_bits\n";
+  print "TYBEC: Bytes per word (b_pw)                     = $b_pw\n";
+  print "TYBEC: Kernel Pipeline  Latency (k_pd)           = $k_pd\n";
+  
+  
+  my $cp_pe_Bops_asympt = ($f_hz / $n_to) * $n_wops * $b_pw * $d_v; 
+    #This is the asymptotic performance (ignoring latency)
+    #See JPDC paper for this
+    
+  my $cp_pe_Bops = ($f_hz * $n_gs * $n_wops * $b_pw)
+                 / ($k_pd + $n_to * $n_gs )
+                 ;
+    #This takes into account the latency as well...`
+    #See Google-keep #tybec17 for this (snapshot)
+    
+  my $cp_pe_asympt_GBops  = $cp_pe_Bops_asympt * 1e-9;
+  my $cp_pe_GBops         = $cp_pe_Bops        * 1e-9;
+  roundOne(\$cp_pe_asympt_GBops);
+  roundOne(\$cp_pe_GBops);
+  print "\n";
+  print "TyBEC: CP of one PE              = $cp_pe_GBops GBops/sec\n";
+  print "TyBEC: CP of one PE (Asymptotic) = $cp_pe_asympt_GBops GBops/sec\n";
   
   #Scaling factor of THIS variant (how many PE replications? / how many kernel pipelines)
+  # This should change when I involve splits and merges
   #---------------------------------------------------------------------------------------
-  #Number of times PE is repeated/scaled (which is same as the K_NL param)
-  $thisScaling = $k_nl;     
-  $cp_pe_Bops_s = $cp_pe_Bops * $thisScaling;
-  $cp_pe_GBops_s = $cp_pe_Bops_s * 1e-9;
+  # OBSOLETE?
+    #Think about how relevant this is for tybec17: shouldn't split/merge
+    #take care of this automatically
+  my $thisScaling   = 1; #TODO: This shouldnt be hardwired
+  my $cp_pe_Bops_s  = $cp_pe_Bops * $thisScaling;
+  my $cp_pe_GBops_s = $cp_pe_Bops_s * 1e-9;
+  roundOne(\$cp_pe_GBops_s);
 
-  print "TyBEC: PE scaling of THIS variant    = $thisScaling\n";
-  print "TyBEC: CPof scaled PEs (this variant)= $cp_pe_GBops_s GBops/sec\n";
+  
+  #print "TyBEC: PE scaling of THIS variant    = $thisScaling\n";
+  #print "TyBEC: CPof scaled PEs (this variant)= $cp_pe_GBops_s GBops/sec\n";
 
   #Maximum Theorotical Computational Power when PEs scaled to maximum possible
   #---------------------------------------------------------------------------
@@ -1359,72 +839,75 @@ sub estimate {
   # If we want to limit scaling to 85% (tool/physical limitation), then it becomes
   # SCm = (85-Rbp)/Rka  <----- (1)
   # We calculate (1) for all 4 resources, and then pick the minumum of that:
-  
+  #print "targetDevice = $targetDevice\n";
+
+
+
+  #print "alutsPercentBasePlat=$alutsPercentBasePlat and $CODE{main}{resource}{bram}\n";
   my $SCm_aluts = (85-$alutsPercentBasePlat)/$alutsPercentKernel;
   my $SCm_regs  = (85-$regsPercentBasePlat)/$regsPercentKernel;
-  my $SCm_m20k  = (85-$m20kPercentBasePlat)/$m20kPercentKernel;
+  my $SCm_bram  = (85-$bramPercentBasePlat)/$bramPercentKernel;
   my $SCm_dsp   = (85-$dspPercentBasePlat) /$dspPercentKernel;
     
-  $maxScaling =  min ( $SCm_aluts
+  my $maxScaling =  min ( $SCm_aluts
                      , $SCm_regs 
-                     , $SCm_m20k 
+                     , $SCm_bram 
                      , $SCm_dsp  
-                     );
+                     ); 
+                     
+  roundOne(\$maxScaling);
+                     
+  my $cp_pe_Bops_smax  = $cp_pe_Bops_s * $maxScaling;
+  my $cp_pe_GBops_smax = $cp_pe_Bops_smax * 1e-9;
   
-#my $maxUtil = max ( $alutsPercentTotal
-#                    , $regsPercentTotal
-#                    , $m20kPercentTotal 
-#                    , $dspPercentTotal  )  ;
-#                    
-  #we restrict the scaling upto 85% of (ANY) resource utilization, to allow for the synthesis tool P&R limitation. Is this sensible? 
-  #Hence I am scaling up to 60% resources
-#  $maxScaling =  int(85/$maxUtil);  
   
-  $cp_pe_Bops_smax  = $cp_pe_Bops_s * $maxScaling;
-  $cp_pe_GBops_smax = $cp_pe_Bops_smax * 1e-9;
-  
+  print "\n";
   print "TyBEC: Theoretical maximum PE scaling         = $maxScaling\n";
-  print "TyBEC: CP of PEs scaled to theoretical maximum= $cp_pe_GBops_smax GBops/sec\n";
-  
-  
+
   #Computational Intensity
   #---------------------------
   #CI = (word-ops-per-kernel * bytes-per-word-op) / (words-per-in-out-tuple * bytes-per-word)
   #      bytes-per-word cancel out...
-  print "n_wops = $n_wops \n";
-  print "w_pt = $w_pt \n";
-  $ci =  $n_wops/$w_pt;
-  print "TyBEC: Computational Intensity                                      = $ci Byte-op/Byte-trasfer\n";
-  
+  my $ci =  $n_wops/$w_pt;
+  roundOne(\$ci);
+  print "\n";
+  print "TyBEC: Computational Intensity = $ci Byte-op/Byte-trasfer\n";
+
   #Bandwidth
   #---------------------------
- 
-  $peakTheoBW_GBps = ($HardwareSpecs::boards{$main::targetBoard}{boardRAMBW_Peak_GBps});
+  my $peakTheoBW_GBps = ($HardwareSpecs::boards{$main::targetBoard}{boardRAMBW_Peak_GBps});
   #BW = max bytes per second to/from memory (for ROOF, this is peak, for CEIL we use sustainable based on design)
-  $bw     = $g_sb_Bps; #bytes-per-sec
-  $bw_G   = $bw * 1e-9;
-  $ci_bw  = $ci * $bw;
+  my $bw     = $g_sb_MBps * 1e6; #Mbytes-per-sec
+  my $bw_M   = $g_sb_MBps; #Mbytes-per-sec
+  my $bw_G   = $bw_M * 1e-3;
+  roundOne(\$bw_G);
+  my $ci_bw     = $ci * $bw;
+  my $ci_bw_G   = $ci_bw * 1e-9;
+  roundOne(\$ci_bw_G);
+   
 
-  $xATcpRoof = $cp_pe_Bops_s / $bw; #the value of CI where the two roofs meet, 
+  my $xATcpRoof = $cp_pe_Bops_s / $bw; #the value of CI where the two roofs meet, 
 
-  print "TyBEC: Sustained Memory Bandwidth (this variant)                    = $bw_G GB/sec\n";
-  print "TyBEC: Theoretical Peak Memory Bandwidth (chosen target)            = $peakTheoBW_GBps GB/sec\n";
   print "\n";
-  
+  print "TyBEC: Sustained Memory Bandwidth (this variant)         = $bw_G GB/sec\n";
+  print "TyBEC: Theoretical Peak Memory Bandwidth (chosen target) = $peakTheoBW_GBps GB/sec\n";
+  print "\n";
+
   #Final Performance
   #---------------------------
   #PERF (BYTE-OPS-PERSEC) = min (CP_PE*scale, CI*BW)
-  $p_bops = min($cp_pe_Bops_s, $ci_bw);
+  my $p_bops = min($cp_pe_Bops_s, $ci_bw);
   my $p_Gbops = $p_bops * 1e-9;
-  my $p_Gbops_round = (int($p_Gbops*10+0.5))/10;
+  roundOne(\$p_Gbops);
+  #my $p_Gbops_round = (int($p_Gbops*10+0.5))/10;
   
-  print "TyBEC: The BOPS/sec performance is the minimum of CP_PE (Computational Performance Roof) and CI*BW (Computational Intensity x Bandwidth)\n";
+  #print "TyBEC: The BOPS/sec performance is the minimum of CP_PE (Computational Performance Roof) and CI*BW (Computational Intensity x Bandwidth)\n";
   print "\n";
-  print "TyBEC: Computation-Bound, CP_PE  x SCALE  = $cp_pe_Bops_s\tBops/sec\n";
-  print "TyBEC: Bandwidth-Bound,   CI x BW         = $ci_bw\tBops/sec\n";
+  print "TyBEC: Computation-Bound, CP_PE  x SCALE  = $cp_pe_GBops_s\tGBops/sec\n";
+  print "TyBEC: Bandwidth-Bound,   CI x BW         = $ci_bw_G\tGBops/sec\n";
   print "\n";
-  print RED "TyBEC: Estimated ASYMPTOTIC Performance from Roofline Analysis\t= ***$p_Gbops_round GBop/sec*** is the \n"; print RESET;
-  print "TyBEC: ASYMPTOTIC --> Effect of filling up offset buffers and pipeline not considered\n";
+  print YELLOW "TyBEC: Estimated Performance from Roofline Analysis\t= ***$p_Gbops GBop/sec***\n"; print RESET;
+#  print "TyBEC: ASYMPTOTIC --> Effect of filling up offset buffers and pipeline not considered\n";
   
   #Write TIKZ plot TEX file
   #---------------------------
@@ -1448,474 +931,577 @@ sub estimate {
   $genCode =~ s/<myXmax>/1000/g;
   $genCode =~ s/<myYmax>/5000/g;
   $genCode =~ s/<maxcpWithMaxScaling>/$cp_pe_GBops_smax/g;
-  $genCode =~ s/<designCP>/$p_Gbops_round/g;
-  
+  $genCode =~ s/<designCP>/$p_Gbops/g;
   
   #target TEX file
-  make_path("TybecBuild/roofline");
-  my $targetFilename = "TybecBuild/roofline/rooflineplot".".tex";  
+  make_path("$outputBuildDir/roofline");
+  my $targetFilename = "$outputBuildDir/roofline/rooflineplot".".tex";  
   open(my $fh, '>', $targetFilename)
     or die "TyBEC: Could not open file '$targetFilename' $!";  
   print $fh $genCode;
   print "TyBEC: Generated custom ROOFLINE plot TEX file \n";
-  close $fh;
-
-  #--------------------------------------
-  print "\n";
-  print "============================================================================\n";
-  print " TEMP: Comparison of Roofline Analysis with EWIT figures \n";
-  print "============================================================================\n\n";
+  close $fh;  
+  print "----------------------------------------------------------------------------\n";
   
-  print "TyBEC: $ewut work-instances/sec from EWIT analysis\n";
+  #Write estimates.log (and batchEstimates.log if applicable)
+  #----------------------------------------------------------
+  #NOTE: These ***MUST*** be in the same sequence as the entries made 
+  #at the beginning of call to batch() [in case you are a batch-child]
+  print $estfh "                                          ,$inputFileTirl       ,           \n";
+  print $estfh "PARAMETER                                 ,VALUE                , UNITS     \n";
+  print $estfh "Performance                               ,$p_Gbops             , GBop/sec  \n";
+  print $estfh "Frequency                                 ,$f_mhz               , MHz       \n";
+  print $estfh "alutsTotal                                ,$alutsTotal          ,           \n";
+  print $estfh "regsTotal                                 ,$regsTotal           ,           \n";
+  print $estfh "bramTotal                                 ,$bramTotal           ,           \n";
+  print $estfh "dspTotal                                  ,$dspTotal            ,           \n";
+  print $estfh "Host sust' BW                             ,$h_sb_Mbps           , Mbps      \n";
+  print $estfh "Gl-Mem sust' BW                           ,$g_sb_Mbps           , Mbps      \n";
+  print $estfh "Size of 1 input array (n_gs)              ,$n_gs                ,           \n";
+  print $estfh "Firing interval/II (n_to)                 ,$n_to                ,           \n";
+  print $estfh "Total word operations per kernel (n_wops) ,$n_wops              ,           \n";
+  print $estfh "Words per tuple (from GMEM)      (w_pt)   ,$w_pt                ,           \n";
+  print $estfh "Size of problem (array size in words)     ,$n_gs                ,           \n";
+  print $estfh "Word size in bits (w_s_bits)              ,$w_s_bits            ,           \n";
+  print $estfh "Bytes per word (b_pw)                     ,$b_pw                ,           \n";
+  print $estfh "Kernel Pipeline  Latency (k_pd)           ,$k_pd                ,           \n";
+  print $estfh "CP of one PE                              ,$cp_pe_GBops         , GBops/sec \n";
+  print $estfh "CP of one PE (Asymptotic)                 ,$cp_pe_asympt_GBops  , GBops/sec \n";
+  print $estfh "Theoretical maximum PE scaling            ,$maxScaling          ,           \n";
+  print $estfh "Computation-Bound: CP_PE  x SCALE         ,$cp_pe_GBops_s       , GBops/sec \n";
+  print $estfh "Bandwidth-Bound:   CI x BW                ,$ci_bw_G             , GBops/sec \n";
+  print $estfh "Computational Intensity                   ,$ci                  , Byte-op/Byte-trasfer\n";
+  print $estfh "alutsKernel                               ,$alutsKernel         ,           \n";
+  print $estfh "regsKernel                                ,$regsKernel          ,           \n";
+  print $estfh "bramKernel                                ,$bramKernel          ,           \n";
+  print $estfh "dspKernel                                 ,$dspKernel           ,           \n";
+  print $estfh "alutsBasePlat                             ,$alutsBasePlat       ,           \n";
+  print $estfh "regsBasePlat                              ,$regsBasePlat        ,           \n";
+  print $estfh "bramBasePlat                              ,$bramBasePlat        ,           \n";
+  print $estfh "dspBasePlat                               ,$dspBasePlat         ,           \n";
   
-  #Convert to Bops/sec
-  # byte-ops-persec = (WI/sec)  x  (#work-items (i.e. global-size, or # of kernel iter's))  x (Byte-ops/iter)
-  my $p_bops_ewit  = $ewut * $n_gs * $n_bops;
-  my $p_Gbops_ewit = $p_bops_ewit * 1e-9;
-  print "TyBEC: ** $p_Gbops_ewit\tGBop/sec ** is the estimated  Performance from EWIT Analysis\n";
-  print "TyBEC: ** $p_Gbops\tGBop/sec ** is the estimated ASYMPTOTIC Performance from Roofline Analysis\n";
-
+  #if I am child of batch job, then write to master results file
+  #open master file, read lines, close, open, append, write back, close
+  if($batchChild) {
+    my $bfh;
+    my $inputBatchFile = "$outputBuildDir/../../batchEstimates.csv";
+    
+    #read contents
+    open($bfh, '<', $inputBatchFile)
+        or die "Could not open file '$inputBatchFile' $!";
+    chomp(my @rlines = <$bfh>);        
+    # = grep { /#.*/ } <$bfh>;   
+    close($bfh);
+    
+    #append new results
+    #NOTE: These ***MUST*** be in the same sequence as the entries made 
+    #at the beginning of call to batch() [in case you are a batch-child]
+    $rlines[0]  = $rlines[0] . ",$inputFileTirl     ";
+    $rlines[1]  = $rlines[1] . ",VALUE              ";
+    $rlines[2]  = $rlines[2] . ",$p_Gbops           ";
+    $rlines[3]  = $rlines[3] . ",$f_mhz             ";
+    $rlines[4]  = $rlines[4] . ",$alutsTotal        ";
+    $rlines[5]  = $rlines[5] . ",$regsTotal         ";
+    $rlines[6]  = $rlines[6] . ",$bramTotal         ";
+    $rlines[7]  = $rlines[7] . ",$dspTotal          ";
+    $rlines[8]  = $rlines[8] . ",$h_sb_Mbps         ";
+    $rlines[9]  = $rlines[9] . ",$g_sb_Mbps         ";
+    $rlines[10] = $rlines[10]. ",$n_gs              ";
+    $rlines[11] = $rlines[11]. ",$n_to              ";
+    $rlines[12] = $rlines[12]. ",$n_wops            ";
+    $rlines[13] = $rlines[13]. ",$w_pt              ";
+    $rlines[14] = $rlines[14]. ",$n_gs              ";
+    $rlines[15] = $rlines[15]. ",$w_s_bits          ";
+    $rlines[16] = $rlines[16]. ",$b_pw              ";
+    $rlines[17] = $rlines[17]. ",$k_pd              ";
+    $rlines[18] = $rlines[18]. ",$cp_pe_GBops       ";
+    $rlines[19] = $rlines[19]. ",$cp_pe_asympt_GBops";
+    $rlines[20] = $rlines[20]. ",$maxScaling        ";
+    $rlines[21] = $rlines[21]. ",$cp_pe_GBops_s     ";
+    $rlines[22] = $rlines[22]. ",$ci_bw_G           ";
+    $rlines[23] = $rlines[23]. ",$ci                ";
+    $rlines[24] = $rlines[24]. ",$alutsKernel       ";
+    $rlines[25] = $rlines[25]. ",$regsKernel        ";
+    $rlines[26] = $rlines[26]. ",$bramKernel        ";
+    $rlines[27] = $rlines[27]. ",$dspKernel         ";
+    $rlines[28] = $rlines[28]. ",$alutsBasePlat     ";
+    $rlines[29] = $rlines[29]. ",$regsBasePlat      ";
+    $rlines[30] = $rlines[30]. ",$bramBasePlat      ";
+    $rlines[31] = $rlines[31]. ",$dspBasePlat       ";
+    
+    #write back
+    open($bfh, '>', $inputBatchFile)
+        or die "Could not open file '$inputBatchFile' $!";
+    print $bfh join ("\n", @rlines);        
+    close ($bfh);
+    
+    
+    
+  }
   
-}
-
+}#cost()
 
 
 # ============================================================================
 # GENERATE()
 # ============================================================================
-sub generate {
-  #locals
-  my $hdlFileName;
-  my $hdlfh;
+sub generateHDL {
 
   print "\n";
   print "=================================================\n";
   print " Verilog HDL Code Generation   					\n";
   print "=================================================\n";
   
-  my $err = 1;
-  # >>>>>>>>>>>>> copy in header file
-  $err &= copy ("$TyBECROOTDIR/hdlCoresTybec/includeTytraCommon.v", $outputRTLDir);
-    print "TyBEC: Imported Tytra header file\n";  
-  # >>>>>>>>>>>>> Import cores used directly
-  # TODO: should only import cores needed by the design
-  $err &= copy ("$TyBECROOTDIR/hdlCoresTybec/pipelined_cores/PipePE_ui_add.v", $outputRTLDir);
-    print "TyBEC: Imported module PipePE_ui_add\n";
-  $err &= copy ("$TyBECROOTDIR/hdlCoresTybec/pipelined_cores/PipePE_ui_sub.v", $outputRTLDir);
-    print "TyBEC: Imported module PipePE_ui_sub\n";
-  $err &= copy ("$TyBECROOTDIR/hdlCoresTybec/pipelined_cores/PipePE_ui_mul.v", $outputRTLDir);
-    print "TyBEC: Imported module PipePE_ui_mul\n";
-  $err &= copy ("$TyBECROOTDIR/hdlCoresTybec/math_cores/ui_add.v", $outputRTLDir);
-    print "TyBEC: Imported module ui_add\n";
-  $err &= copy ("$TyBECROOTDIR/hdlCoresTybec/math_cores/ui_sub.v", $outputRTLDir);
-    print "TyBEC: Imported module ui_sub\n";
-  $err &= copy ("$TyBECROOTDIR/hdlCoresTybec/math_cores/ui_mul.v", $outputRTLDir);
-    print "TyBEC: Imported module ui_mul\n";
-  $err &= copy ("$TyBECROOTDIR/hdlCoresTybec/buffer_cores/delayline_z1.v", $outputRTLDir);
-    print "TyBEC: Imported module delayline_z1\n";
-  $err &= copy ("$TyBECROOTDIR/hdlCoresTybec/memory_cores/LMEM.v", $outputRTLDir);
-    print "TyBEC: Imported module LMEM\n";
-  $err &= copy ("$TyBECROOTDIR/hdlCoresTybec/memory_cores/LMEM_1RP_1WP.v", $outputRTLDir);
-    print "TyBEC: Imported module LMEM_1RP_1WP\n";
-  $err &= copy ("$TyBECROOTDIR/hdlCoresTybec/memory_cores/LMEM_1RP_2WP.v", $outputRTLDir);
-    print "TyBEC: Imported module LMEM_1RP_1WP\n";
-  $err &= copy ("$TyBECROOTDIR/hdlCoresTybec/memory_cores/LMEM_1RP_4WP.v", $outputRTLDir);
-    print "TyBEC: Imported module LMEM_1RP_1WP\n";
-  $err &= copy ("$TyBECROOTDIR/hdlCoresTybec/memory_cores/LMEM_4RP_1WP.v", $outputRTLDir);
-    print "TyBEC: Imported module LMEM_1RP_1WP\n";
-  #copy ('./hdlCoresTybec/memory_cores/LMEM.v', $outputRTLDir);
-  #  print "TyBEC: Imported module LMEM\n";
-    # memory cores cant be instantiated here as we would need multi-port 
-    # with specific configurations that are design dependant
-
-  if(!$err) {
-    die "TyBEC: **ERROR** importing one or more TyTra Cores\n";
-  }
+  #create target directories
+  make_path("$outFPGACode");
+  make_path("$outputRTLDir");
+  make_path("$outputTbDir");
+  make_path("$outputSimDir");  
   
   # --------------------------------------------------
-  # Identify top and leaf functions
+  # get data/stream width to pass on to generators
   # --------------------------------------------------
-  #reduce clutter, and get keys of all funcs called by main (should be just one)
-  my $cgHash = $CODE{callGraph}{launch}{calls}{main}{calls}; 
-  my @cgHashKeys = keys %{$cgHash}; 
+  my $datat; #complete type (e.g i32)
+  my $dataw; #width in bits
+  my $dataBase; #base type (ui, i, or float)
+  #TODO: I am using the data type of the first stream I see in main (connectd to global memory object) to set data type in the top as well
+  #but this is artificially limiting  $strBuf = $dataw;
+  foreach (keys %{$CODE{main}{symbols}} ) {
+    if ($CODE{main}{symbols}{$_}{cat} eq 'streamread') {
+      $datat = $main::CODE{main}{symbols}{$_}{dtype};
+      ($dataw = $datat)     =~ s/\D*//g;
+      ($dataBase = $datat)  =~ s/\d*//g;
+    }
+  }  
+  my $streamw;
+  if($dataBase eq 'float')  {$streamw=$dataw+2;}
+  else                      {$streamw=$dataw;}  
+  
+  # --------------------------------------------------
+  # Loop through all nodes, generate code
+  # --------------------------------------------------
+  #my @nodes_all = $main::dfGraph -> vertices;
+  #my @nodes_isolated = $main::dfGraph->isolated_vertices(); #for testing if any unconnected node (redundant)
 
-  #get the name and type of top function, 
-  # and the keys of all function it calls (if any), and the number of child Funcs
-  my $topFuncKey  = $cgHashKeys[0];
-  my $topFuncType = $cgHash->{$topFuncKey}{type};
-  my $topFuncName = $cgHash->{$topFuncKey}{name};    
-  #my @topChildrenKeys = keys %{$cgHash->{$topFuncKey}{calls}};
-  #my $topChildrenNum  = @topChildrenKeys;
+  #identify connected groups (hierarchical modules)
+  #This approach takes care of arbitrary hierarchical depth as all functions will necessarily have their own connected groups
+  my @nodes_conn = $main::dfGraph->weakly_connected_components();
 
-  #local variables
-  # my @leafPipeFuncs; # Array of leaf-level pipeline functions
-  # my $leafPipeFun; #to make obsolete
-  # my $topParFun; #to make obsolete
-  
-  ## DO I NEED THE FOLLOWING BLOCK?
-  ## # cPipe - leaf and top functions are same
-  ## #------------------------------------------
-  ## if ($desConfigNew eq 'cPipe') {
-  ##   print "TyBEC: $topFuncName is the top level pipeline module in the configuration.\n";
-  ##   #$leafPipeFuncs[0] = $pipeTop; #only one leaf level function, same as top in this config
-  ##   $leafPipeFuncs[0] = $cgHash->{$topFuncKey}{calls}{$topChildrenKeys[0]};    
-  ## }
-  ## 
-  ## # cPar_PipeS: Parallel array of symmetric pipes
-  ## # ----------------------------------------------
-  ## #  ..cPar_PipeA not supported yet, so all concurrent pipelines must be symmetric
-  ## elsif ($desConfigNew eq 'cPar_PipeS') {
-  ##   print "TyBEC: $topFuncName is the top level parallel module in the configuration\n";
-  ##   
-  ##   #which PIPE function is called repeatedly from top PAR?
-  ##   #since multiple *symmetric* pipes called from the top func, so the name of any one of them will do
-  ##   #so get the keys and select first
-  ##   $leafPipeFuncs[0] = $cgHash->{$topFuncKey}{calls}{$topChildrenKeys[0]};    
-  ## }#elsif
-  ## 
-  ## # cPipe_PipeA: Coarse-level pipeline of asymmetric pipelines
-  ## #-------------------------------------------------------------
-  ## elsif ($desConfigNew eq 'cPipe_PipeA') {
-  ##   print "TyBEC: $topFuncName is the top level pipeline module in this CG-pipeline configuration\n";
-  ## 
-  ##   my $j = 0;
-  ##   #which PIPE functions are called from top CG-PIPE?
-  ##   foreach my $key (keys %{$cgHash->{$topFuncKey}{calls}}) {
-  ##       print "TyBEC: $key is a second (leaf) level pipeline function in the CG-pipeline\n";
-  ##       $leafPipeFuncs[$j] = $key;
-  ##       $j++;
-  ##   }#foreach        
-  ## }#elsif
-   
-  # ========================================================
-  # LEAF PIPES: Generate code for all leaf PIPEs 
-  # -- Generate **ComputePipe** module for each leaf PIPEs
-  #   -- also generating any required COMBI module
-  # -- Generate **CorePipe** module for each leaf PIPE
-  # ========================================================
-  
-  #only for those configurations that have leaf PIPE(s)
-  if  (   ($desConfigNew eq 'cPipe') 
-      ||  ($desConfigNew eq 'cPar_PipeS')
-      ||  ($desConfigNew eq 'cPipe_PipeA') 
-      ||  ($desConfigNew eq 'cPar_PipeS_PipeA') ){
-  
-    #collect keys for PIPE func(s), depending on configuration
-    # if top is the leaf PIPe (cPipe), then key collected differently than if a PAR/PIPE top has PIPE children
-    my @leafPipeFuncKeys;
+  #loop through each group (module)
+  #-----------------------
+  foreach (@nodes_conn) { 
+    my @conn_group_items = @{$_};
+
+    #get name of connected group by peeking at first elements
+    my ($dfgroup, undef) = split('\.',$conn_group_items[0],2);
+    #print("::dfgroup = $dfgroup\n");
+
+    #----
+    #main
+    #if DFG group is main, then it needs to generate itself as 
+    #it has no parent module (i.e. it is not a NODE in another graph)
+    #----
+    #If MAIN is vectorized, then none of the children need to be vectorized
+    my $vect      = $ioVect;
+    #since function modules are generated when they are called by another function, and main is never called
+    #so we need a separate route for generating main module
+    if($dfgroup eq 'main') {
+      my $module    = 'main';
+      my $hdlFileName = "$outputRTLDir/$module".".v";
+      open(my $hdlfh, '>', $hdlFileName)
+        or die "Could not open file '$hdlFileName' $!";
+      #HdlCodeGen::genMain($hdlfh, $module, 'untitled', $outputRTLDir, $CODE{main});    
+      HdlCodeGen::genMapNode_hier($hdlfh, $module, 'untitled', $outputRTLDir, 'main', $CODE{main}, $vect);    
+    }
     
-    #If the configuration depth = 1 with just one pipeline, then that is the only leaf pipeline
-    if ($desConfigNew eq 'cPipe') {
-      push @leafPipeFuncKeys, $topFuncKey; }
-    #If the configuration depth = 2, then leaf pipelines are those called by top module
-    #which may be pipe or par
-    elsif (   ($desConfigNew eq 'cPar_PipeS')
-          ||  ($desConfigNew eq 'cPipe_PipeA') ){
-      @leafPipeFuncKeys = keys %{$cgHash->{$topFuncKey}{calls}};}
-  
-    #If the config depth = 3 (limited to cPar_PipeS_PipeA)
-    elsif ($desConfigNew eq 'cPar_PipeS_PipeA') {
-      # the CG pipeline would have been identified in the analyze() stage, so use
-      # it now to find keys to all leaf-level pipes
-      @leafPipeFuncKeys = keys %{$cgHash->{$topFuncKey}{calls}{$topCGpipeKey}{calls}};
-    }#elsif
-    else {}
-  
-    #now that we have located all leaf pipelines, generate them
-    #outer for loop for each leaf pipeline
-    foreach my $pipeFuncKey (@leafPipeFuncKeys) {
-      #get name of PIPE function; remove .N from key
-      (my $pipeFuncName = $pipeFuncKey) =~ s/\.\d+//;
+    #loop through each item (node) in a group (main or otherwise)
+    #-----------------------------------------
+    foreach (@conn_group_items) {
+      my $parentFunc= $dfGraph -> get_vertex_attribute ($_, 'parentFunc');
+      my $symbol    = $dfGraph -> get_vertex_attribute ($_, 'symbol'    );
+      my $ident; #the identifier used for code gen; different way to get it for different cats  
+      my $cat       = $CODE{$parentFunc}{symbols}{$symbol}{cat};
       
-      # --------------------------------------------------
-      # COMB modules generation
-      # --------------------------------------------------
-      #loop over each INSTRUCTION in the pipeline function, and identify COMB func calls
-      #and generate them
-      foreach my $instrKey (keys %{$CODE{$pipeFuncName}{instructions}} ) {
-        #check if instruction is function call instruction
-        if ($CODE{$pipeFuncName}{instructions}{$instrKey}{instrType} eq 'funcCall') {
-          #now check if that function call instruction is for a function of type COMB
-          # TODO: INsert check here to ensure the same comb function is not repeatedly generate - though no harm really?
-          if ($CODE{$pipeFuncName}{instructions}{$instrKey}{funcType} eq 'comb') {
-            #extract name of function from instruction key (remove .N)
-            (my $instrName = $instrKey) =~ s/\.\d+//;
-            # open verilog target file
-            my $hdlFileName = "$outputRTLDir/CustomComb_$instrName".".v";
-            open(my $hdlfh, '>', $hdlFileName)
-              or die "Could not open file '$hdlFileName' $!";   
-            
-            # generate file from template
-            #args: 
-            # - file handler for generated file
-            # - module name
-            # - design name
-            # - hash for relevant leaf level PIPE function
-            HdlCodeGen::genCustomComb($hdlfh, "CustomComb_$instrName", 'untitled', $CODE{$instrName}); 
-          }#if COMB
-        }#if funcCall instr
-      }#foreach instrKey
+    #print("::symbol = $symbol\n");
+    #print("::cat    = $cat\n");
+      
+      
+      #generate leaf nodes (impscal)
+      #-----------------------------
+      #leaf nodes are always scalar, and vectorization happens by creating multiple instances at the parent level
+      #but the code generator can work with other vector widths as well
+      $vect      = 1; 
+      if (  ($cat eq 'impscal') 
+         || ($cat eq 'func-arg')
+         ){
+        ($ident =  $symbol) =~ s/(%|@)//; #remove %/@
+        my $module    = $parentFunc."_".$ident;
+        my $hdlFileName = "$outputRTLDir/$module".".v";
+        open(my $hdlfh, '>', $hdlFileName)
+          or die "Could not open file '$hdlFileName' $!";
+      #print RED; print "::generate:: generating node = $_, parentFunc = $parentFunc, symbol = $symbol, ident = $ident, cat = $cat \n"; print RESET;
+        HdlCodeGen::genMapNode_leaf($hdlfh, $module, 'untitled', $outputRTLDir, $CODE{$parentFunc}{symbols}{$symbol}, $vect);    
+      }
+      
+      #generate inferred AXI fifo buffers
+      #-------------------------------
+      if ($cat eq 'fifobuffer') {
+        ($ident =  $symbol) =~ s/(%|@)//; #remove %/@
+        my $module    = $parentFunc."_".$ident;
+        my $hdlFileName = "$outputRTLDir/$module".".v";
+        open(my $hdlfh, '>', $hdlFileName)
+          or die "Could not open file '$hdlFileName' $!";
+        HdlCodeGen::genAxiFifoBuffer($hdlfh, $module, 'untitled', $outputRTLDir, $CODE{$parentFunc}{symbols}{$symbol}, $vect);    
+      }
 
-      # --------------------------------------------------
-      # Generate Compute_PIPE module 
-      # --------------------------------------------------
-      # Now that any required COMB blocks have been generated, generate the PIPE module
+      #generate inferred AXI stencil buffer
+      #-------------------------------
+      if ($cat eq 'smache') {
+        ($ident =  $symbol) =~ s/(%|@)//; #remove %/@
+        my $module    = $parentFunc."_".$ident;
+        my $hdlFileName = "$outputRTLDir/$module".".v";
+        open(my $hdlfh, '>', $hdlFileName)
+          or die "Could not open file '$hdlFileName' $!";
+        HdlCodeGen::genAxiStencilBuffer($hdlfh, $module, 'untitled', $outputRTLDir, $CODE{$parentFunc}{symbols}{$symbol}, $vect);    
+      }
       
-      # open verilog target file
-      $hdlFileName = "$outputRTLDir/ComputePipe_$pipeFuncName".".v";
-      open($hdlfh, '>', $hdlFileName)
-        or die "Could not open file '$hdlFileName' $!";   
-      
-      # generate file from template
-      #args: 
-      # - file handler for generated file
-      # - module name
-      # - design name
-      # - hash for relevant leaf level PIPE function
-      HdlCodeGen::genComputePipe($hdlfh, "ComputePipe_$pipeFuncName", 'untitled', $CODE{$pipeFuncName}); 
-      
-      # --------------------------------------------------
-      # Generate the corePipe for each leaf PIPE
-      # --------------------------------------------------
-      
-      # Create Cores for Compute-Pipes only if they are the top-level pipes, and there
-      # is no parent CG pipeline
-      if  (   ($desConfigNew eq 'cPipe') 
-      ||  ($desConfigNew eq 'cPar_PipeS') ){      
-        #for loop for each pipe
-        # open verilog target file
-        $hdlFileName = "$outputRTLDir/CorePipe_$pipeFuncName".".v";
-        open($hdlfh, '>', $hdlFileName)
-          or die "Could not open file '$hdlFileName' $!";   
-        
-        # generate file from template
-        #args: 
-        # - file handler for generated file
-        # - module name
-        # - design name
-        # - target directory needed as this generator can spawn its own genrator calls (for offsetStreams)
-        # - hash for relevant leaf level PIPE function
-        HdlCodeGen::genCorePipe($hdlfh, "CorePipe_$pipeFuncName", 'untitled', $outputRTLDir, $CODE{$pipeFuncName});
-      }#if
-    }#foreach pipeFuncKey
-  }#if config has LEAF pipes
+      #generate autoindex nodes
+      #-------------------------------
+      if ($cat eq 'autoindex') {
+        ($ident =  $symbol) =~ s/(%|@)//; #remove %/@
+        my $module    = $parentFunc."_".$ident;
+        my $hdlFileName = "$outputRTLDir/$module".".v";
+        open(my $hdlfh, '>', $hdlFileName)
+          or die "Could not open file '$hdlFileName' $!";
+        HdlCodeGen::genAutoIndex($hdlfh, $module, 'untitled', $outputRTLDir, $CODE{$parentFunc}{symbols}{$symbol}, $vect);    
+      }
 
-  # ================================================================
-  # PARENT PIPES: generate top-level parent CG-Pipe (if applicable)
-  # ================================================================
-  #for now only relevant for cPipe_PipeA and cPar_PipeS_PipeA
-  if  (   ($desConfigNew eq  'cPipe_PipeA')
-      ||  ($desConfigNew eq  'cPar_PipeS_PipeA') ){
-      
-      #get name from key
-      (my $topCGpipeName = $topCGpipeKey) =~ s/\.\d+//;
-      
-      # Generate the Compute-Pipe
-      # -------------------------
-      $hdlFileName = "$outputRTLDir/ComputePipe_$topCGpipeName".".v";
-      open($hdlfh, '>', $hdlFileName)
-        or die "Could not open file '$hdlFileName' $!";   
-      
-      # generate file from template
-      #args: 
-      # - file handler for generated file
-      # - module name
-      # - design name
-      # - target directory needed as this generator can spawn its own genrator calls (for offsetStreams)
-      # - hash for relevant leaf level PIPE function
-      HdlCodeGen::genComputePipe_CG($hdlfh, "ComputePipe_$topCGpipeName", 'untitled', $CODE{$topCGpipeName}); 
-  
-      # Generate the Core
-      # -------------------------
-      $hdlFileName = "$outputRTLDir/CorePipe_$topCGpipeName".".v";
-      open($hdlfh, '>', $hdlFileName)
-        or die "Could not open file '$hdlFileName' $!";   
-      # generate file from template
-      # args: 
-      # - file handler for generated file
-      # - module name
-      # - design name
-      # - target directory needed as this generator can spawn its own genrator calls (for offsetStreams)
-      # - hash for relevant leaf level PIPE function
-      HdlCodeGen::genCorePipe($hdlfh, "CorePipe_$topCGpipeName", 'untitled', $outputRTLDir, $CODE{$topCGpipeName});
-  }#if
-
-  # ------------------------------------------------------
-  # generate the ComputePipe for each leaf PIPE
-  # ------------------------------------------------------
-  # 
-  # #only for those configurations that have leaf PIPE(s)
-  # if  (   ($desConfigNew eq 'cPipe') 
-  #     ||  ($desConfigNew eq 'cPar_PipeS')
-  #     ||  ($desConfigNew eq 'cPipe_PipeA') ){
-  # 
-  #   #collect keys for PIPE func(s), depending on configuration
-  #   # if top is the leaf PIPe, then key collected differently than if PAR/PIPE top has PIPE children
-  #   my @leafPipeFuncKeys;
-  #   if ($desConfigNew eq 'cPipe') {
-  #     push @leafPipeFuncKeys, $topFuncKey; }
-  #   else {
-  #     @leafPipeFuncKeys = keys $cgHash->{$topFuncKey}{calls};}
-  #     
-  #   # Now that keys are collected, generated modules for each
-  #   foreach my $pipeFuncKey (@leafPipeFuncKeys) {
-  #   
-  #     #get name of function corresponding to this key
-  #     
-  #     #for loop for each LEAF pipe
-  #     # open verilog target file
-  #     my $hdlFileName = "$outputRTLDir/ComputePipe_$pipeFuncKey".".v";
-  #     open(my $hdlfh, '>', $hdlFileName)
-  #       or die "Could not open file '$hdlFileName' $!";   
-  #     
-  #     # generate file from template
-  #     #args: 
-  #     # - file handler for generated file
-  #     # - module name
-  #     # - design name
-  #     # - hash for relevant leaf level PIPE function
-  #     HdlCodeGen::genComputePipe($hdlfh, "ComputePipe_$pipeFuncKey", 'untitled', $CODE{$pipeFuncKey}); 
-  #   }#foreach leaf 
-  # }#if leaf pipe(s)
-  
-  
-  # --------------------------------------------------
-  # >>>>>>>>>>>>> generate the corePipe
-  # --------------------------------------------------
-  
-  # #for loop for each pipe
-  # # open verilog target file
-  # $hdlFileName = "$outputRTLDir/CorePipe_$leafPipeFun".".v";
-  # open($hdlfh, '>', $hdlFileName)
-  #   or die "Could not open file '$hdlFileName' $!";   
-  # 
-  # # generate file from template
-  # #args: 
-  # # - file handler for generated file
-  # # - module name
-  # # - design name
-  # # - target directory needed as this generator can spawn its own genrator calls (for offsetStreams)
-  # # - hash for relevant leaf level PIPE function
-  # HdlCodeGen::genCorePipe($hdlfh, "CorePipe_$leafPipeFun", 'untitled', $outputRTLDir, $CODE{$leafPipeFun}); 
-  
-  # --------------------------------------------------
-  # >>>>>>>>>>>>> generate the Compute Unit 
-  # --------------------------------------------------
+      #function-call nodes
+      #----------------------------
+      #TODO: hardwired - change
+      #I am hardwiring this for now, but this should be inferred by the parser
+      #in this case, I am hardwiring to 1, as MAIN is vectorized, so we dont want duplicate vectorization
+      $vect      = 1;
+      #$vect      = 2;
+      if($cat eq 'funcall') {
+        ($ident = $symbol)  =~ s/\_\d+//; #extract function name from function-call hash 
+        my $childFuncDepth  = $CODE{$ident}{depth}; #hierarchical or flat
+        my $dfgroup_local   = $ident; #the DFG group of the child function (same as $ident)        
+        my $module    = $parentFunc."_".$ident;
+        my $hdlFileName = "$outputRTLDir/$module".".v";
+        open(my $hdlfh, '>', $hdlFileName)
+          or die "Could not open file '$hdlFileName' $!";
+        HdlCodeGen::genMapNode_hier($hdlfh, $module, 'untitled', $outputRTLDir, $dfgroup_local, $CODE{$ident}, $vect);
+      }
+    }#foreach item in group
+  }#foreach group
  
-  $hdlFileName = "$outputRTLDir/ComputeUnit.v";
-  open($hdlfh, '>', $hdlFileName)
-    or die "Could not open file '$hdlFileName' $!";   
+  # --------------------------------------------------
+  # Top HDL wrapper, depends on target
+  # -------------------------------------------------- 
+  my $module      = 'func_hdl_top';
+  my $hdlFileName;
 
-  #HdlCodeGen::genComputeUnit($hdlfh, $outputRTLDir, "ComputeUnit", 'untitled', 1, \%CODE, $topFuncName);
-  #get the name of the top level pipe function
-  #which may or may not be the overall top function
-  #and may or may not be replicated in a PAR block
-  (my $topPipeName = $topPipeKey) =~ s/\.\d+//;
+  $hdlFileName = "$outputRTLDir/$module".".v"  if ($targetNode eq "bolamaNallatech");
+  $hdlFileName = "$outputRTLDir/$module".".sv" if ($targetNode eq "awsf12x"); #sdx requires this to be SystemVerilog
   
-  # C2 configuration: single pipeline
-  if ( ($desConfigNew eq 'cPipe') 
-    || ($desConfigNew eq 'cPipe_PipeA') ) {
-    # generate file from template
-    #args: 
-    # - file handler for generated file
-    # - target dir of codeGen required for importing LMEM module 
-    # - module name
-    # - design name
-    # - num of pipelines
-    # - hash for CODE
-    # - name of leaf level pipeline function
-  HdlCodeGen::genComputeUnit($hdlfh, $outputRTLDir, "ComputeUnit", 'untitled', 1, \%CODE, $topPipeName); 
+  open(my $hdlfh, '>', $hdlFileName)
+    or die "Could not open file '$hdlFileName' $!";
+  
+  OclCodeGen_aocl::genHdlWrapper($hdlfh, $module, 'untitled', $outputRTLDir, $ioVect) 
+    if ($targetNode eq "bolamaNallatech");
+  OclCodeGen_sdx::genHdlWrapper ($hdlfh, $module, 'untitled', $outputRTLDir, $ioVect, $datat, $dataw) 
+    if ($targetNode eq "awsf12x");
+
+  #the SDx top level RTL file requires generation too (simply to pass vectorizatiom macro and data width)
+  if ($targetNode eq "awsf12x")  {
+    $module      = 'krnl_vadd_rtl';
+    $hdlFileName = "$outputRTLDir/$module".".v";
+    open(my $hdlfh, '>', $hdlFileName)
+      or die "Could not open file '$hdlFileName' $!";
+    OclCodeGen_sdx::genSdxTopRtl ($hdlfh, $module, 'untitled', $outputRTLDir, $ioVect, $datat, $dataw);
   }
   
-  # C1 configuration: PAR over Symmetrical PIPEs
-  elsif (   ($desConfigNew eq 'cPar_PipeS') 
-        ||  ($desConfigNew eq 'cPar_PipeS_PipeA') ) {
-    # generate file from template
-    #args: 
-    # - file handler for generated file
-    # - target dir of codeGen required for importing LMEM module 
-    # - module name
-    # - design name
-    # - num of pipelines
-    # - hash for CODE
-    # - name of pipeline function (may be CG) that is repeated symmetrically in PAR
-    # - name of top level par function
-  HdlCodeGen::genComputeUnit($hdlfh, $outputRTLDir, "ComputeUnit", 'untitled', $NparPipes, \%CODE, $topPipeName, $topFuncName); 
-  }
+
+ 
+  # --------------------------------------------------
+  # import utility functions 
+  # --------------------------------------------------  
+  my $srcdir = "$TyBECROOTDIR/hdlGenTemplates"; #reduce clutter
+  #copy in util.v
+  my $err;
+  #$err =copy("$srcdir/template.util.v"            , "$outputRTLDir/../sim/util.v");  
+  $err =copy("$srcdir/template.util.v"            , "$outputRTLDir/util.v");  
+
   
-  # Not a valid configuration for Generation
-  else {die "This configuration is currently not supported for code-generation. If you only wish to analyze and cost the configuration, run tybec on without the --g (generate) flag";}
   
   # --------------------------------------------------
-  # >>>>>>>>>>>>> generate the Compute Device
-  # --------------------------------------------------
-  
-  # # open verilog target file
-  # $hdlFileName = "$outputRTLDir/ComputeDevice.v";
-  # open($hdlfh, '>', $hdlFileName)
-  #   or die "Could not open file '$hdlFileName' $!";   
-  # 
-  # # C2 configuration: single pipeline
-  # if ( ($desConf eq 'cPIPE') || ($desConf eq 'cPIPE_PARs') || ($desConf eq 'cPIPE_COMBs') ) {
-  #   # generate file from template
-  #   #args: 
-  #   # - file handler for generated file
-  #   # - module name
-  #   # - design name
-  #   # - hash for relevant TOP LEVEL function (the one called from main)
-  # #  HdlCodeGen::genComputeDevice($hdlfh, "ComputeDevice", 'untitled', 1, \%CODE, $leafPipeFun); 
-  # }
-  # # C1 configuration: PAR over PIPE
-  # elsif ( ($desConf eq 'cPAR_PIPEs_PARs') || ($desConf eq 'cPAR_PIPEs') || ($desConf eq 'cPAR_PIPEs_COMBs') ) {
-  #   # generate file from template
-  #   #args: 
-  #   # - file handler for generated file
-  #   # - module name
-  #   # - design name
-  #   # - num of pipelines
-  #   # - hash for CODE
-  #   # - name of leaf level pipeline function
-  #   # - name of top level par function
-  # #  HdlCodeGen::genComputeDevice($hdlfh, "ComputeDevice", 'untitled', $Npipes, \%CODE, $leafPipeFun, $topParFun); 
-  # }
-    
-  # --------------------------------------------------
-  # >>>>>>>>>>>>> generate Custom Configuration File
-  # --------------------------------------------------
-  
-  # open verilog target file
-  $hdlFileName = "$outputRTLDir/includeCustomConfig.v";
+  # generate testbench
+  # --------------------------------------------------  
+  $module    = 'testbench';
+  #my $hdlFileName = "$outputRTLDir/../sim/$module.v";
+  $hdlFileName = "$outputTbDir/$module.v";
   open($hdlfh, '>', $hdlFileName)
-    or die "Could not open file '$hdlFileName' $!";   
-  
-  # generate file from template
-  #args: 
-  # - file handler for generated file
-  # - design name
-  # - (reference to) hash for relevant TOP LEVEL function (the one called from main)
-  HdlCodeGen::genCustomConfig($hdlfh, 'untitled', \%CODE); 
-  
-  # #Print compile time and duration.
-  # my $end = Time::HiRes::gettimeofday();
-  # #print  "Build started at $end\n";
-  # printf ("Build took %.2f seconds\n", $end - $start);
-  
-  
-  # -------------------------------------------------------------------
-  # >>>>>>>>>>>>> print costs again as GENERATE too updates COSTS"
-  # -------------------------------------------------------------------
-  #FIXE: This is an ugly hack?
-  
-  
-  print "\n";
-  print "============================================================================\n";
-  print " RESOURCE COST ESTIMATES AFTER UPDATES FROM GENERATION       \n";
-  print "============================================================================\n\n";
-  
-  print "The Estimated Cost of the Compute Unit is as follows:\n";
-  print Dumper(\%{$CODE{launch}{cost}});
-  
+    or die "Could not open file '$hdlFileName' $!";
+  HdlCodeGen::genTestbench($hdlfh, $module, 'untitled', $outputTbDir, $ioVect);  
 }#sub
+
+
+# ============================================================================
+# GENERATE OCL SHELL
+# ============================================================================
+sub generateOCL {
+  print "\n";
+  print "=================================================\n";
+  print " OCL Wrapper Code Generation   					\n";
+  print "=================================================\n";
+  
+  my $srcdir;
+  my $err;
+  my $fh;
+  my $targetFileName;
+  
+  make_path($outputOCLDir);
+  
+  if($targetNode eq 'bolamaNallatech') {
+    make_path($outputOCLDir.'/host');
+    make_path($outputOCLDir.'/host/inc');
+    make_path($outputOCLDir.'/host/src');
+    make_path($outputOCLDir.'/lib' ); 
+    make_path($outputOCLDir.'/lib/hdl' ); 
+    $srcdir = "$TyBECROOTDIR/oclGenTemplates/aocl";
+  }
+  elsif($targetNode eq 'awsf12x') {
+    make_path($outputOCLDir.'/scripts');
+    make_path($outputOCLDir.'/src');
+    $srcdir = "$TyBECROOTDIR/oclGenTemplates/sdx/$ocxTempVer/";
+  }
+  else {die "Illegal targetNode definition";}
+  
+
+  # --------------------------------------------------
+  # get data/stream width to pass on to generators
+  # --------------------------------------------------
+  my $datat; #complete type (e.g i32)
+  my $dataw; #width in bits
+  my $dataBase; #base type (ui, i, or float)
+  #TODO: I am using the data type of the first stream I see in main (connectd to global memory object) to set data type in the top as well
+  #but this is artificially limiting  $strBuf = $dataw;
+  foreach (keys %{$CODE{main}{symbols}} ) {
+    if ($CODE{main}{symbols}{$_}{cat} eq 'streamread') {
+      $datat = $main::CODE{main}{symbols}{$_}{dtype};
+      ($dataw = $datat)     =~ s/\D*//g;
+      ($dataBase = $datat)  =~ s/\d*//g;
+    }
+  }  
+  my $streamw;
+  if($dataBase eq 'float')  {$streamw=$dataw+2;}
+  else                      {$streamw=$dataw;}  
+  
+  # ====================================================
+  if($targetNode eq 'bolamaNallatech') {
+  # ====================================================
+    # --------------------------------------------------
+    # Copy in files where no modification needed)
+    # --------------------------------------------------  
+    $err =copy("$srcdir/template.README"            , "$outputOCLDir/README");
+    $err&=copy("$srcdir/template.make_lib.pl"       , "$outputOCLDir/make_lib.pl");
+    $err&=copy("$srcdir/host/inc/ACLHostUtils.h"    , "$outputOCLDir/host/inc/ACLHostUtils.h");
+    $err&=copy("$srcdir/host/inc/ACLHostUtils.h"    , "$outputOCLDir/host/inc/ACLHostUtils.h");
+    $err&=copy("$srcdir/host/inc/ACLThreadUtils.h"  , "$outputOCLDir/host/inc/ACLThreadUtils.h");
+    $err&=copy("$srcdir/host/inc/timer.h"           , "$outputOCLDir/host/inc/timer.h");
+    $err&=copy("$srcdir/host/src/ACLHostUtils.cpp"  , "$outputOCLDir/host/src/ACLHostUtils.cpp");
+    $err&=copy("$srcdir/host/src/ACLThreadUtils.cpp", "$outputOCLDir/host/src/ACLThreadUtils.cpp");
+    $err&=copy("$srcdir/host/src/timer.cpp"         , "$outputOCLDir/host/src/timer.cpp");
+    $err&=copy("$srcdir/host/template.Makefile"     , "$outputOCLDir/host/Makefile");
+    $err&=copy("$srcdir/template.build_emu.sh"      , "$outputOCLDir/build_emu.sh");
+    $err&=copy("$srcdir/template.build_hw.sh"       , "$outputOCLDir/build_hw.sh");
+    $err&=copy("$srcdir/template.build_emu_aocOnly.sh"  , "$outputOCLDir/build_emu_aocOnly.sh");
+    $err&=copy("$srcdir/template.build_hw_aocOnly.sh"   , "$outputOCLDir/build_hw_aocOnly.sh");
+    $err&=copy("$srcdir/template.clean.sh"          , "$outputOCLDir/clean.sh");
+    
+    # --------------------------------------------------
+    # Copy in already generated HDL files (kernel)
+    # --------------------------------------------------  
+    opendir(my $direc, $outputRTLDir) || die "Can't open $outputRTLDir: $!";
+    while (readdir $direc) {
+      $err &= copy("$outputRTLDir/$_", "$outputOCLDir/lib/hdl/");
+    }
+    closedir $direc;  
+  
+  
+    # --------------------------------------------------
+    # Kernels.cl
+    # --------------------------------------------------  
+    $targetFileName = "$outputOCLDir/kernels.cl";
+    open($fh, '>', $targetFileName)
+      or die "Could not open file '$targetFileName' $!";
+    if($oclKernelPipe){OclCodeGen_aocl::genKernelOclPipe($fh, 'untitled', $outputOCLDir, $ioVect);}
+    else              {OclCodeGen_aocl::genKernelHdlPipe($fh, 'untitled', $outputOCLDir, $ioVect);}
+  
+    # --------------------------------------------------
+    # hdl_lib.xml
+    # --------------------------------------------------  
+    $targetFileName = "$outputOCLDir/lib/hdl_lib.xml";
+    open($fh, '>', $targetFileName)
+      or die "Could not open file '$targetFileName' $!";
+    OclCodeGen_aocl::genXML($fh, 'untitled', $outputOCLDir, $outputRTLDir, $ioVect);
+  
+    # --------------------------------------------------
+    # cl_model.cl and hdl_lib.h
+    # --------------------------------------------------  
+    my ($fh_c, $fh_h);
+    my $targetFileName_cmodel = "$outputOCLDir/lib/c_model.cl";
+    my $targetFileName_hdllib = "$outputOCLDir/lib/hdl_lib.h";
+    open($fh_c, '>', $targetFileName_cmodel)
+      or die "Could not open file '$targetFileName_cmodel' $!";
+    open($fh_h, '>', $targetFileName_hdllib)
+      or die "Could not open file '$targetFileName_hdllib' $!";
+    OclCodeGen_aocl::genCModelAndHdlLibH($fh_c, $fh_h, 'untitled', $outputOCLDir, $ioVect);
+  
+    # --------------------------------------------------
+    # main.cpp
+    # --------------------------------------------------  
+    $targetFileName = "$outputOCLDir/host/src/main.cpp";
+    open($fh, '>', $targetFileName)
+      or die "Could not open file '$targetFileName' $!";
+    OclCodeGen_aocl::genMainCpp($fh, 'untitled', $outputOCLDir);
+      
+  }#if
+  
+  # ====================================================
+  elsif($targetNode eq 'awsf12x') {
+  # ====================================================
+    # --------------------------------------------------
+    # Copy in files where no modification needed)
+    # --------------------------------------------------  
+    #$err = dircopy($srcdir,$outputOCLDir);
+    #print ("dircopy err = $err\n");
+    $err =copy("$srcdir/Makefile"                    , "$outputOCLDir/Makefile");
+    $err =copy("$srcdir/README.md"                   , "$outputOCLDir/README.md");
+    $err =copy("$srcdir/local_hwemu_build_and_run.sh", "$outputOCLDir/local_hwemu_build_and_run.sh");
+    $err =copy("$srcdir/local_hwSynth_build.sh"      , "$outputOCLDir/local_hwSynth_build.sh");
+    $err =copy("$srcdir/local_createAFIonS3bucket.sh", "$outputOCLDir/local_createAFIonS3bucket.sh");
+    $err =copy("$srcdir/run_on_aws_f1.sh"            , "$outputOCLDir/run_on_aws_f1.sh");
+    $err =copy("$srcdir/describe-fpga-images.sh"     , "$outputOCLDir/describe-fpga-images.sh");
+    $err =copy("$srcdir/clean.sh"                     , "$outputOCLDir/clean.sh");
+    $err =copy("$srcdir/move_files_to_github_for_awsf1.sh"                     
+              , "$outputOCLDir/move_files_to_github_for_awsf1.sh");
+    $err =copy("$srcdir/local_host_only_build_and_emu_run.sh"
+              , "$outputOCLDir/local_host_only_build_and_emu_run.sh");
+    $err =copy("$srcdir/description.json"            , "$outputOCLDir/description.json");
+    $err =copy("$srcdir/aws_hwemu_build.sh"          , "$outputOCLDir/aws_hwemu_build.sh");
+    $err =copy("$srcdir/scripts/gen_xo.tcl"          , "$outputOCLDir/scripts/gen_xo.tcl");
+    $err =copy("$srcdir/scripts/package_kernel.tcl"  , "$outputOCLDir/scripts/package_kernel.tcl");
+    #$err =copy("$srcdir/src/kernel.xml"              , "$outputOCLDir/src/kernel.xml"); 
+      #this should now be custom generated
+    
+    #these are HDL files, but since they are part of the shell needed for sdaccel integration, they
+    #are created in the call to generateOCL
+    $err =copy("$srcdir/src/hdl/krnl_vadd_rtl_axi_read_master.sv"  
+            , "$outputOCLDir/src/hdl/krnl_vadd_rtl_axi_read_master.sv");
+    $err =copy("$srcdir/src/hdl/krnl_vadd_rtl_axi_write_master.sv" 
+            , "$outputOCLDir/src/hdl/krnl_vadd_rtl_axi_write_master.sv");
+    $err =copy("$srcdir/src/hdl/krnl_vadd_rtl_control_s_axi.v"     
+            , "$outputOCLDir/src/hdl/krnl_vadd_rtl_control_s_axi.v");
+    $err =copy("$srcdir/src/hdl/krnl_vadd_rtl_counter.sv"          
+            , "$outputOCLDir/src/hdl/krnl_vadd_rtl_counter.sv");
+    $err =copy("$srcdir/src/hdl/krnl_vadd_rtl_int.sv"              
+            , "$outputOCLDir/src/hdl/krnl_vadd_rtl_int.sv");
+    #$err =copy("$srcdir/src/hdl/krnl_vadd_rtl_example.sv"              
+    #        , "$outputOCLDir/src/hdl/krnl_vadd_rtl_example.sv");
+    #$err =copy("$srcdir/src/hdl/krnl_vadd_rtl_example_vadd.sv"              
+    #        , "$outputOCLDir/src/hdl/krnl_vadd_rtl_example_vadd.sv");
+    
+    # --------------------------------------------------
+    # main.c
+    # --------------------------------------------------  
+    $targetFileName = "$outputOCLDir/src/main.c";
+    open($fh, '>', $targetFileName)
+      or die "Could not open file '$targetFileName' $!";
+    OclCodeGen_sdx::genHostCpp($fh, 'untitled', $outputOCLDir, $ioVect, $datat, $dataw);
+
+    # --------------------------------------------------
+    # kernel.xml
+    # --------------------------------------------------  
+    $targetFileName = "$outputOCLDir/src/kernel.xml";
+    open($fh, '>', $targetFileName)
+      or die "Could not open file '$targetFileName' $!";
+    OclCodeGen_sdx::genKernelXML($fh, 'untitled', $outputOCLDir, $ioVect, $datat, $dataw);
+  }
+  else {die "Illegal targetNode definition";}
+
+  print "=================================================\n";
+}#()
+
+# ============================================================================
+# Post-processing and cleanup
+# ============================================================================
+sub post{
+#Print compile time and duration.
+my $end = Time::HiRes::gettimeofday();
+#print  "Build started at $end\n";
+printf ("Build took %.2f seconds\n", $end - $start);
+
+# write to LOG file here
+print $outfh Dumper(\%CODE); 
+
+#write to JSON as well 
+my $json = encode_json \%CODE;
+print $outfh_json $json;
+#display DFG, and emit it as DOT
+#-------------------------------
+
+my $dfGraph_lines = $dfGraph;
+$dfGraph_lines =~ s/,/\n/g;
+
+#print "The graph is $dfGraph\n";
+print "The graph is: \n $dfGraph_lines\n";
+
+#graph as PNG
+my $dfGraphDotFileName;
+my $dfGraphDotFH;
+$dfGraphDotFileName = "DFG.png";
+#$dfGraphDotFileName = "DFG.jpg";
+open($dfGraphDotFH, '>', "$outputBuildDir/$dfGraphDotFileName")
+  or die "Could not open file '$dfGraphDotFileName' $!";
+
+print $dfGraphDotFH $dfGraphDot->as_png;
+#print $dfGraphDotFH $dfGraphDot->as_jpeg;
+#system("cygstart ./$outputBuildDir/$dfGraphDotFileName");# if($dot);
+close $dfGraphDotFH;
+
+#graph as PS
+$dfGraphDotFileName = "DFG.ps";
+open($dfGraphDotFH, '>', "$outputBuildDir/$dfGraphDotFileName")
+  or die "Could not open file '$dfGraphDotFileName' $!";
+
+print $dfGraphDotFH $dfGraphDot->as_ps;
+close $dfGraphDotFH;
+
+
+#create DOT graph of callgraph
+#----------------------------
+if($dot) {
+  print $dotfh $dotGraph->as_png;
+  #print $dotfh $dotGraph->as_jpeg;
+  
+  #if ($OSNAME eq 'MSWin32') {
+  #  system("cygstart ./TybecBuild/DOT.png") if($dot);
+    #system("cygstart ./TybecBuild/DOT.jpg") if($dot);
+  #else {#assume linux and use EYE to open
+  #  system("eog ./TybecBuild/DOT.png") if($dot);}
+  close $dotfh;
+}
+
+#close files
+close $fhinputpp;
+close $main::outfh;
+close $main::outfh_json;
+# remove temporary output file of GCC Pre-Processor
+#system("rm $tempMacExpFile");
+
+}#post()
 
 # ----------------------------------------------------------------------------
 #
@@ -1923,6 +1509,7 @@ sub generate {
 sub printHelp {
   print "\ntybec command line options and default values\n";
   print "---------------------------------------------\n\n";
+  print "--clt  [OFF]           :run c2llcm2tir on input first (not integrated yet)\n";                   
   print "--d    [OFF]           :turn on DEBUG mode                       \n";                   
   print "--batch[OFF]           :run on all tirl files in current folder  \n";
   print "--i    [./file.tirl]   :input TIRL FILE                          \n";
@@ -1933,9 +1520,16 @@ sub printHelp {
   print "--help                 :Display help                             \n";
   print "--v                    :Show current TyBEC release version       \n";
   print "--g    [OFF]           :Generate HDL code                        \n";
-  print "--e    [ON]            :Estimate Resources and Performance from TIRL\n";
+  print "--e    [OFF]           :Estimate Resources and Performance from TIRL\n";
   print "--dot  [OFF]           :Run DOT and display graph at the end of compile\n";
-  print "--tar  [bolamaNallatech] :Target board [philpotsMaxeler/bolamaNallatech/bolamaAlphadata]\n";
+  print "--tar  [awsf12x]       :Target node [awsf12x/philpotsMaxeler/bolamaNallatech/bolamaAlphadata]\n";
+  print "--lambda [OFF]         :You will provide lamdba function for CPU baseline/AOCL-only  comparison \n";
+  print "                        You *MUST* provide a string for the lambda function using\n";
+  print "                        array operations (index = 'i') on the input arrays. \n";
+  print "                        Place it in ./lambda.txt \n";
+  print "--iov  [1]             :Degree of IO vectorization (coalescing) \n";
+  print "--op   [OFF]           :Should I create the kernel (CG) pipeline in OCL \n";
+  print "--cio  [ON]            :Should I coalesce IOs (makes OCX integration simpler)\n";
 }
 
 # ----------------------------------------------------------------------------
@@ -1946,6 +1540,7 @@ sub printVer {
   print "This is an in-house release and on-going work\n";
   print "For help, type \"tybec.pl --h\"\n"; 
 }
+
 
 
 

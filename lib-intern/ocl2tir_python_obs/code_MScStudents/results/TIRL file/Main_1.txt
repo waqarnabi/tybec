@@ -1,0 +1,25 @@
+define void @kernelInput(i32 %aIn0, i32 %aIn1, i32 %aIn2, i32 %ch00, i32 %ch01, i32 %ch02) pipe  {
+ i32 %ch00 = load i32 %aIn0 
+ i32 %ch01 = load i32 %aIn1 
+ i32 %ch02 = load i32 %aIn2 
+ ret void
+}
+define void @kernelCompute(i32 %ch00, i32 %ch01, i32 %ch02, i32 %ch1) pipe  {
+i32 %6 =add i32 %ch00, %ch01, 
+i32 %ch1 =add i32 %6, %ch02, 
+ ret void
+}
+define void @kernelOutput(i32  %aOut, i32 %ch1) pipe  {
+ i32 %aOut = load i32 %ch1 
+ ret void
+}
+
+;---------------
+;KernelTop
+;---------------
+define void @kernelTop (i32 %aIn0, i32 %aIn1, i32 %aIn2, i32 %aOut,  )pipe {
+call @kernelInput(i32%aIn0,i32%aIn1,i32%aIn2,i32%ch00,i32%ch01,i32%ch02)
+call @kernelCompute(i32%ch00,i32%ch01,i32%ch02,i32%ch1)
+call @kernelOutput(i32%aOut,i32%ch1)
+ret void
+}

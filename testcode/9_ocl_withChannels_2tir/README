@@ -1,0 +1,25 @@
+WN, Glasgow, 2019.02.11
+=======================
+
+This a synthetic, barebones example to Opencl (kernel) code to TIR (via LLVM-IR)
+and then on the sdx solution.
+
+Based on MSc student project, Fall 2018
+
+BUILD & RUN (C and Fortran)
+------------
+>> cd ./ocl 
+>> run_ocl2tir.sh kernels_channels.cl
+
+LIMITATIONS (as of 2019.02.11)
+-------------------------------
++ Ocl kernel code only
++ Using global scope channels (AOCL style)
++ Scalarized kernels
++ No loops or branches
++ An (ugly) hack to differentiate between input and ouput memory streams in the opencl kernel code
+  + the last 3 characters of identifier of *output* streams MUST be "out" (case insensitive)
++  Another hack:  all stream sizes currently hardwired to 1024 WORDS
+  + at least use __attribute__ like I do in my c2llvm2tir
+
+

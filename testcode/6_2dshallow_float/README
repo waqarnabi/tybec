@@ -1,0 +1,13 @@
+WN, Glasgow, 2019.06.13
+-----------------------
+
++ In addition to being a testcode for tybec:
++ I am using this for generating costs of opaque funcs for Cris's work.
++ Note that for the c2llvm2tir pass, I am using a combination of gen  the LLVM-IR code, then manually using parts of
+it that are useful to generate the TuTra-Ir (I could probably automate that quickly)
++ So in my ./tir folder, the tir files are part automated, part manually written
+
++ Things I need to do to the C code to make the LLVM-IR behave:
+- Write  floating point constants like this: eg. 5.0f (otherwise LLVM-IR is cluttered with double-float converions
+- have a stub definition of ABS/fabs function that is used in the code
+

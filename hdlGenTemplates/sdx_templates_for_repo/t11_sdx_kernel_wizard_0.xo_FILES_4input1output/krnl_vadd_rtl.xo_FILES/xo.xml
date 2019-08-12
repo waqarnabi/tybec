@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Root VersionMajor="3" VersionMinor="3" IpCache="no">
+  <Kernels>
+    <Kernel Name="krnl_vadd_rtl" Dir="krnl_vadd_rtl" IP="ip_repo/tytra_kernel_krnl_vadd_rtl_1_0" TopIpDir="." ProjectID="fd5add04d2a24a458e5719f86aa4452a">
+      <SupportedFlows>
+        <SupportedFlow>HW_EMU</SupportedFlow>
+        <SupportedFlow>SYSTEM</SupportedFlow>
+      </SupportedFlows>
+    </Kernel>
+  </Kernels>
+</Root>

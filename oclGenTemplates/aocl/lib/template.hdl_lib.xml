@@ -1,0 +1,29 @@
+<EFI_SPEC>
+<FUNCTION name="func_lib" module="func_hdl_top">
+    <ATTRIBUTES>
+      <IS_STALL_FREE value="yes"/>
+      <IS_FIXED_LATENCY value="yes"/>
+      <EXPECTED_LATENCY value="[latency]"/>
+      <CAPACITY value="1"/>
+      <HAS_SIDE_EFFECTS value="yes"/>
+      <ALLOW_MERGING value="no"/>      
+    </ATTRIBUTES>
+    <INTERFACE>
+      <AVALON port="clock" type="clock"/>
+      <AVALON port="resetn" type="resetn"/>
+      <AVALON port="ivalid" type="ivalid"/>
+      <AVALON port="iready" type="iready"/>
+      <AVALON port="ovalid" type="ovalid"/>
+      <AVALON port="oready" type="oready"/>
+[setPorts]
+    </INTERFACE>
+    <C_MODEL>
+      <FILE name="c_model.cl" />
+    </C_MODEL>
+    <REQUIREMENTS>
+[includeHdlFiles]
+    </REQUIREMENTS>
+  </FUNCTION>
+</EFI_SPEC>
+
+

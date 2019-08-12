@@ -1,0 +1,191 @@
+;-- =============================================================================
+;-- Company      : Unversity of Glasgow, Comuting Science
+;-- Author:        Syed Waqar Nabi
+;-- 
+;-- Create Date  : 2014.11.03
+;-- Project Name : TyTra
+;--
+;-- Dependencies : 
+;--
+;-- Revision     : 
+;-- Revision 0.01.20141103: File Created
+;-- Revision 0.02.20190618: Updated for new tybec version (and tir syntax)
+;-- 
+;-- Conventions  : 
+;-- =============================================================================
+;--
+;-- =============================================================================
+;-- General Description
+;-- -----------------------------------------------------------------------------
+;-- Tytra-IR BACKEND file for a synthetic example that has both POW and COS/SIN
+;--
+;-- =============================================================================
+;--
+;-- C-style macros 
+#define NTOT 101
+#define NZ   10
+#define SIZE (NZ*NTOT)
+
+;--I have the same arithmetic instructions for data_t/int for now
+#define fadd add
+#define fsub sub
+#define fmul mul
+#define fdiv udiv
+
+#define data_t float32
+
+;--constants (init to random values)
+#define const1 0.1
+#define const2 0.1
+#define pi     3.14
+
+; =============================================================================
+; -- STUBS
+; =============================================================================
+;--Stub functions requied for instrinsic functions like cos/sin/pow
+;--they all have place-holder instructions to ensure connections are made
+;--TyBEC should them intrinsic keyword/function, and generate the
+;--appropriate flopoco unit without lookiing inside this function
+
+; -----------------------------------------------------------------------------
+; pow stub
+; -----------------------------------------------------------------------------
+define void @pow  ( data_t %out
+                  , data_t %in1
+                  , data_t %in2
+                  ) pipe 
+{
+  ;--this is just place-holder instruction to ensure connections are made
+  ;--TyBEC should recognize "pow" as intrinsic keyword/function, and generate the
+  ;--appropriate flopoco unit without lookiing inside this function
+  data_t %out = pow data_t %in1, %in2
+  ret void
+}
+
+; -----------------------------------------------------------------------------
+; cos stub
+; -----------------------------------------------------------------------------
+define void @cos  ( 
+   data_t %out
+  ,data_t %in
+  ) pipe 
+{
+  data_t %out = cos data_t %in
+  ret void
+}
+
+; -----------------------------------------------------------------------------
+; sin stub
+; -----------------------------------------------------------------------------
+define void @sin  ( 
+    data_t %out
+  , data_t %in
+  ) pipe 
+{
+  data_t %out = sin data_t %in
+  ret void
+}
+
+; =============================================================================
+; -- KERNELS
+; =============================================================================
+; -----------------------------------------------------------------------------
+;-- ker0
+; -----------------------------------------------------------------------------
+define void @ker0 ( 
+   data_t %in1
+  ,data_t %in2
+  ,data_t %out
+  ) pipe
+{
+  data_t %mul   = fmul data_t %in1, %in2
+  data_t %div   = fdiv data_t %mul, const1
+  call @cos(data_t %call, data_t %div)
+  data_t %out   = fmul data_t const2, %call
+  ret void
+}
+
+ 
+; -----------------------------------------------------------------------------
+;-- ker1
+; -----------------------------------------------------------------------------
+define void @ker1 ( 
+   data_t %in
+  ,data_t %out1
+  ,data_t %out2
+  ) pipe
+{
+  call @pow(data_t %out1, data_t %in,  data_t %in)
+  data_t %out2 = fdiv data_t %in, const2
+  ret void
+}
+
+; -----------------------------------------------------------------------------
+;-- ker2
+; -----------------------------------------------------------------------------
+define void @ker2 ( 
+   data_t %in1
+  ,data_t %in2
+  ,data_t %out
+  ) pipe
+{
+  data_t %local1 = fadd data_t %in1   , %in2
+  data_t %out    = fmul data_t %local1, const1
+  ret void
+}
+
+; -----------------------------------------------------------------------------
+;-- kernelTop
+; -----------------------------------------------------------------------------
+define void @kernelTop(
+   data_t %in1
+  ,data_t %in2
+  ,data_t %out
+  ) pipe
+{
+
+  call @ker0 ( 
+     data_t %in1
+    ,data_t %in2
+    ,data_t %out_ker0
+    )
+  
+  call @ker1 ( 
+     data_t %out_ker0
+    ,data_t %out1_ker1
+    ,data_t %out2_ker1
+    )
+
+  call @ker2 ( 
+     data_t %out1_ker1
+    ,data_t %out2_ker1
+    ,data_t %out
+    )
+
+
+  ret void
+}
+
+; =============================================================================
+; -- MAIN
+; =============================================================================
+
+define void @main () {
+
+  %in1 = alloca [SIZE x data_t], addrspace(1)
+  %in2 = alloca [SIZE x data_t], addrspace(1)
+  %out = alloca [SIZE x data_t], addrspace(1)
+
+  %in1_stream_load     = streamread data_t, data_t*  %in1    , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  %in2_stream_load     = streamread data_t, data_t*  %in2    , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  
+  streamwrite data_t %out_stream_store, data_t* %out, !tir.stream.type   !stream1d, !tir.stream.saddr  !0, !tir.stream.size   !SIZE, !tir.stream.stride !1
+  
+  call @kernelTop ( 
+     data_t %in1_stream_load
+    ,data_t %in2_stream_load
+    ,data_t %out_stream_store
+    )
+  
+  ret void
+}

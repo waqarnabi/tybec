@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root versionMajor="1" versionMinor="6">
+  <kernel name="ktop" language="ip_c" vlnv="tytra:kernel:ktop:1.0" attributes="" preferredWorkGroupSizeMultiple="0" workGroupSize="1" interrupt="true">
+    <ports>
+      <port name="s_axi_control" mode="slave" range="0x1000" dataWidth="32" portType="addressable" base="0x0"/>
+      <port name="m00_axi" mode="master" range="0xFFFFFFFFFFFFFFFF" dataWidth="32" portType="addressable" base="0x0"/>
+      <port name="m01_axi" mode="master" range="0xFFFFFFFFFFFFFFFF" dataWidth="128" portType="addressable" base="0x0"/>
+    </ports>
+    <args>
+      <arg name="axi00_ptr0" addressQualifier="1" id="0" port="m00_axi" size="0x8" offset="0x010" hostOffset="0x0" hostSize="0x8" type="int*"/>
+      <arg name="axi00_ptr1" addressQualifier="1" id="1" port="m00_axi" size="0x8" offset="0x018" hostOffset="0x0" hostSize="0x8" type="int*"/>
+      <arg name="axi00_ptr2" addressQualifier="1" id="2" port="m00_axi" size="0x8" offset="0x020" hostOffset="0x0" hostSize="0x8" type="int*"/>
+      <arg name="axi00_ptr3" addressQualifier="1" id="3" port="m00_axi" size="0x8" offset="0x028" hostOffset="0x0" hostSize="0x8" type="int*"/>
+      <arg name="axi01_ptr0" addressQualifier="1" id="4" port="m01_axi" size="0x8" offset="0x030" hostOffset="0x0" hostSize="0x8" type="int*"/>
+    </args>
+  </kernel>
+</root>

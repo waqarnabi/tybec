@@ -42,13 +42,54 @@ sub log2 {
         return ceil( log($n)/log(2));# + 0.99); #0.99 for CEIL operation
     }
 
-
 # =========================
 # DEVICES
 # =========================
 our %devices;
 
 #DSPs figures are for 18x18 multiplier (0.5 for 27x27)
+
+#the device for Cris's GPCE paper; check figures
+#https://www.xilinx.com/support/documentation/selection-guides/cost-optimized-product-selection-guide.pdf#S6
+$devices{Spartan6_XC6SLX75}
+  = { 'Tech'      => '28nm'
+    , 'ALMS'      => 11662
+    , 'ALUTS'     => 46648  
+    , 'LE'        => 11662
+    , 'REGS'      => 93296 
+    , 'DSPs'      => 132 
+    , 'M20KBlocks'=> 0   #Stratix only
+    , 'M20Kbits'  => 0   #Stratix only
+    , 'MLABbits'  => 0   #Stratix only
+    , 'BRAM36KbBlocks' => 0     #Virtex only
+    , 'BRAM18KbBlocks' => 172  #18Kb each
+    , 'BRAMbits'   => 3096000  #Virtex only
+    , 'DistRAMbits'=> 0       #Virtex only
+    , 'totalRAM'   => 3096000   
+    , 'maxF_MHz'   => 500  #check
+    , 'powAver_W'  => 20   #check
+    };   
+
+#the device for Cris's GPCE paper;  check figures
+#https://www.xilinx.com/support/documentation/selection-guides/cost-optimized-product-selection-guide.pdf#S6
+$devices{Spartan6_XC6SLX45}
+  = { 'Tech'      => '28nm'
+    , 'ALMS'      => 6822
+    , 'ALUTS'     => 27288
+    , 'LE'        => 6822
+    , 'REGS'      => 54576
+    , 'DSPs'      => 58 
+    , 'M20KBlocks'=> 0   #Stratix only
+    , 'M20Kbits'  => 0   #Stratix only
+    , 'MLABbits'  => 0   #Stratix only
+    , 'BRAM36KbBlocks' => 0     #Virtex only
+    , 'BRAM18KbBlocks' => 116  #18Kb each
+    , 'BRAMbits'   => 2088000  #Virtex only
+    , 'DistRAMbits'=> 0       #Virtex only
+    , 'totalRAM'   => 2088000   
+    , 'maxF_MHz'   => 500  #check
+    , 'powAver_W'  => 20   #check
+    };   
 
 #the device on the maxeler machine
 $devices{StratixV_GS_D8}
@@ -75,11 +116,15 @@ $devices{StratixV_GS_D5}
   = { 'Tech'      => '28nm'
     , 'ALMS'      => 172600
     , 'ALUTS'     => 345200  
+    , 'aluts'     => 345200  
     , 'LE'        => 457000
     , 'REGS'      => 690400 
+    , 'regs'      => 690400 
     , 'DSPs'      => 3000 #check
+    , 'dsps'      => 3000 #check
     , 'M20KBlocks'=> 2014       #Stratix only
     , 'M20Kbits'  => 40000000   #Stratix only
+    , 'bram'      => 40000000   #Stratix only
     , 'MLABbits'  => 8630       #Stratix only
     , 'BRAM36KbBlocks' => 0     #Virtex only
     , 'BRAM18KbBlocks' => 0     #Virtex only
@@ -108,6 +153,30 @@ $devices{Virtex7_XC7_VX69OT}
     , 'BRAMbits' => 52920000      #Virtex only
     , 'DistRAMbits'  => 10888000  #Virtex only
     , 'totalRAM'  => 52920000 #FIXME
+    , 'maxF_MHz'  => 500  #check
+    , 'powAver_W' => 20   #check
+    };   
+    
+#todo: this is the device on AWS-F1; check resources availabel and update following    
+$devices{ultrascale}
+  = { 'Tech'      => '28nm'
+    , 'ALMS'      => 172600
+    , 'ALUTS'     => 345200  
+    , 'aluts'     => 345200  
+    , 'LE'        => 457000
+    , 'REGS'      => 690400 
+    , 'regs'      => 690400 
+    , 'DSPs'      => 3000 #check
+    , 'dsps'      => 3000 #check
+    , 'M20KBlocks'=> 2014       #Stratix only
+    , 'M20Kbits'  => 40000000   #Stratix only
+    , 'bram'      => 40000000   #Stratix only
+    , 'MLABbits'  => 8630       #Stratix only
+    , 'BRAM36KbBlocks' => 0     #Virtex only
+    , 'BRAM18KbBlocks' => 0     #Virtex only
+    , 'BRAMbits' => 0           #Virtex only
+    , 'DistRAMbits'  => 0       #Virtex only
+    , 'totalRAM'  => 45600000
     , 'maxF_MHz'  => 500  #check
     , 'powAver_W' => 20   #check
     };   
@@ -193,6 +262,29 @@ $boards{alphadata_adm_pcie_7v3}
     , 'hostBW_Peak_Mbps'     => 63000
     , 'hostBW_Peak_MBps'     => 7875
     };   
+    
+
+#todo: update these numbers, I just copy-pasted them
+#also check info about devices/board
+
+$boards{awsf1Board}
+  = { 'numDevices'          => 1 
+    , 'deviceName'          => 'ultrascale'
+    , 'boardRAM_type'       => 'DDR3'
+    , 'boardRAM_banks'      => 2   
+    , 'boardRAM_perbank_GB' => 8
+    , 'boardRAM_GB'         => 16
+    , 'boardRAMBW_MTps'     => 1300
+    , 'boardRAMBW_Peak_Mbps'=> 83200
+    , 'boardRAMBW_Peak_MBps'=> 10400
+    , 'boardRAMBW_Peak_Gbps'=> 83.2
+    , 'boardRAMBW_Peak_GBps'=> 10.4
+    , 'hostInterface'       => 'pci3.0x8'
+    , 'hostBW_Peak_Gbps'     => 63
+    , 'hostBW_Peak_GBps'     => 7 
+    , 'hostBW_Peak_Mbps'     => 63000
+    , 'hostBW_Peak_MBps'     => 7875
+    };   
 
 # =========================
 # NODES
@@ -228,3 +320,35 @@ $nodes{bolamaAlphadata}
     ,  'hostCpuRam_GB' => 64
     ,  'hdd_TB'        => 1
      };
+     
+#todo: update the following information     
+$nodes{awsf12x}
+  = { 'numBoards'     => 1
+    ,  'boardName'     => 'awsf1Board'
+    ,  'hostCpuDevice' => 'xeonE52609V2'
+    ,  'hostCpuSockets'=> 2
+    ,  'hostCpuCores'  => 8
+    ,  'hostCpuRam_GB' => 64
+    ,  'hdd_TB'        => 1
+     };
+     
+$nodes{awsf14x}
+  = { 'numBoards'     => 4
+    ,  'boardName'     => 'awsf1Board'
+    ,  'hostCpuDevice' => 'xeonE52609V2'
+    ,  'hostCpuSockets'=> 2
+    ,  'hostCpuCores'  => 8
+    ,  'hostCpuRam_GB' => 64
+    ,  'hdd_TB'        => 1
+     };     
+
+$nodes{awsf116x}
+  = { 'numBoards'     => 16
+    ,  'boardName'     => 'awsf1Board'
+    ,  'hostCpuDevice' => 'xeonE52609V2'
+    ,  'hostCpuSockets'=> 2
+    ,  'hostCpuCores'  => 8
+    ,  'hostCpuRam_GB' => 64
+    ,  'hdd_TB'        => 1
+     };     
+

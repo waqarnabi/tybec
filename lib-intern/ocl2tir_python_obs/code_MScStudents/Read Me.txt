@@ -1,0 +1,8 @@
+*The Zip contains the original OpenCL file called kernels_channels.cl, script named gen_llvm_ir_no_inline.sh, and python source-source translator named TM_parse_final.ipynb.
+
+*Users can use the gen_llvm_ir_no_inline.sh script in LLVM to generate LLVM IR.
+
+*Then running the TM_parse_final.ipynb. to translate the LLVM IR file in to TyTra-IR.
+    /* <The Python must  to use the version 3.0 or higher> */
+
+*Using the TyTra back end compiler called TyBEC to generate FPGA solution.

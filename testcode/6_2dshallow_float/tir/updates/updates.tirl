@@ -1,0 +1,101 @@
+
+;-- =============================================================================
+;-- Company      : Unversity of Glasgow, Comuting Science
+;-- Author:        Syed Waqar Nabi
+;-- 
+;-- Create Date  : 2014.11.03
+;-- Project Name : TyTra
+;--
+;-- Dependencies : 
+;--
+;-- Revision     : 
+;-- Revision 0.01. File Created
+;-- 
+;-- Conventions  : 
+;-- =============================================================================
+;--
+;-- =============================================================================
+;-- General Description
+;-- -----------------------------------------------------------------------------
+;-- Tytra-IR BACKEND file DYN1 kernel from 2d-shallow-water
+;--
+;--
+;-- =============================================================================
+;--
+#define SIZE 1024
+
+;--I have the same arithmetic instructions for data_t/int for now
+#define fadd add
+#define fsub sub
+#define fmul mul
+#define fdiv udiv
+
+#define data_t float32
+
+;--constants (init to random values)
+#define dt   0.1
+#define dx   0.1 
+#define dy   0.1
+#define hmin 0.1
+#define g    9.8
+
+
+; -----------------------------------------------------------------------------
+;-- updates
+; -----------------------------------------------------------------------------
+
+define void @updates  ( data_t %un_j_k
+                      , data_t %vn_j_k
+                      , data_t %hzero_j_k
+                      , data_t %eta_j_k
+                      , data_t %u_j_k
+                      , data_t %v_j_k
+                      , data_t %h_j_k
+                      , data_t %wet_j_k
+                      ) pipe  
+{
+  data_t %add   = fadd data_t %hzero_j_k, %eta_j_k
+  data_t %h_j_k = load data_t %add
+  store data_t 1, data_t* %wet_j_k
+  data_t %u_j_k = load data_t %un_j_k
+  data_t %v_j_k = load data_t %vn_j_k
+  ret void
+}
+
+; ----------------------------------------------------------
+; -- ** MAIN
+; ----------------------------------------------------------
+
+define void @main () {
+  %un_j_k   = alloca [SIZE x data_t], addrspace(1)
+  %vn_j_k   = alloca [SIZE x data_t], addrspace(1)
+  %hzero_j_k= alloca [SIZE x data_t], addrspace(1)
+  %eta_j_k  = alloca [SIZE x data_t], addrspace(1)
+
+  %u_j_k    = alloca [SIZE x data_t], addrspace(1)
+  %v_j_k    = alloca [SIZE x data_t], addrspace(1)
+  %h_j_k    = alloca [SIZE x data_t], addrspace(1)
+  %wet_j_k  = alloca [SIZE x data_t], addrspace(1)
+  
+
+  %un_j_k_stream_load     = streamread data_t, data_t*  %un_j_k    , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  %vn_j_k_stream_load     = streamread data_t, data_t*  %vn_j_k    , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  %hzero_j_k_stream_load  = streamread data_t, data_t*  %hzero_j_k , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  %eta_j_k_stream_load    = streamread data_t, data_t*  %eta_j_k   , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  
+  streamwrite data_t %u_j_k_stream_store  , data_t*  %u_j_k     , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  streamwrite data_t %v_j_k_stream_store  , data_t*  %v_j_k     , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  streamwrite data_t %h_j_k_stream_store  , data_t*  %h_j_k     , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  streamwrite data_t %wet_j_k_stream_store, data_t*  %wet_j_k   , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+    
+  call @updates ( data_t %un_j_k_stream_load
+                , data_t %vn_j_k_stream_load
+                , data_t %hzero_j_k_stream_load
+                , data_t %eta_j_k_stream_load
+                , data_t %u_j_k_stream_store
+                , data_t %v_j_k_stream_store
+                , data_t %h_j_k_stream_store
+                , data_t %wet_j_k_stream_store
+                )
+  ret void
+}

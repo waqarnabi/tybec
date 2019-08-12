@@ -1,0 +1,51 @@
+WN, Glasgow, July 2019
+=======================
+
+Template SDX projects code (templates) that can be used in TyBEC code generator.
+Tested on sdx ver 2018_2
+Generated via SDX (complete projects are in BOLAMA, ../sdx_projects_2018_2
+
+
+* See ../sdx_projects_obs_2017ver/README for older projects, now obsolete since I moved to ver 2018_2
+
+* /t03
++ 1 bank 
++ 1 interface
++ 4 input  memory arguments
++ 4 output memory argumetns
++ 0 scalar arguments
+
+* t10
++ 1 bank
++ 1 interface
++ 1 128-bit input  (for 4 float inputs coalesced)
++ 1 128-bit output (for 4 float inputs coalesced)
+
++ HIERARCHY (2018.2)
+  - testbench / OCL SHELL
+    - sdx_kernel_wizard_0
+      - sdx_kernel_wizard_0_control_s_axi
+      - sdx_kernel_wizard_0_example
+        - sdx_kernel_wizard_0_example_vadd
+          - sdx_kernel_wizard_0_example_axi_read_master
+          - sdx_kernel_wizard_0_example_adder (USER LOGIC/MODULES) <--
+            - 
+          - sdx_kernel_wizard_0_example_axi_write_master
+    - control_sdx_kernel_wizard_0_vip (master control, likely only for TB)
+    - slv_m00_axi_vip                 (Slave MM, likely only for TB)
+  - ../component.xml
+          
++ HIERARCHY OF PREVIOUS VERSION (2017.4, as used in OCL-HDL code)
+  - krnl_vadd_rtl
+    - krnl_vadd_rtl_int
+      - krnl_vadd_rtl_control_s_axi
+      - krnl_vadd_rtl_axi_read_master
+      - xpm_fifo_sync
+      - func_hdl_top (USER LOGIC/MODULES) <--
+      - krnl_vadd_rtl_axi_write_master
+  - ../kernel.xml
+
+    
+
+
+

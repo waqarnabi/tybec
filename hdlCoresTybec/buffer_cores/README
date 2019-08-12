@@ -1,0 +1,9 @@
+/* stream_buffer.v */
++ Borrowed and adapted from my earlier work on smache.
+
+
+
+/* ty_fifoBuffCore.v */
++ Used earlier for stream buffers, but found unsuitable (2019.06.11)
+
+

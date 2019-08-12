@@ -1,0 +1,45 @@
+$VAR1 = {
+          'write_pipe' => {
+                            'cat' => 'stub',
+                            'name' => 'write_pipe',
+                            'args' => {
+                                        'ch00' => {
+                                                    'cat' => 'undefined',
+                                                    'name' => 'ch00',
+                                                    'type' => 'i32'
+                                                  },
+                                        'data0' => {
+                                                     'cat' => 'gmem',
+                                                     'name' => 'data0',
+                                                     'type' => 'i32*'
+                                                   }
+                                      }
+                          },
+          'get_pipe_num_packets' => {
+                                      'cat' => 'stub',
+                                      'name' => 'get_pipe_num_packets',
+                                      'args' => {
+                                                  'a' => {
+                                                           'cat' => 'undefined',
+                                                           'name' => 'a',
+                                                           'type' => 'i32'
+                                                         }
+                                                }
+                                    },
+          'read_pipe' => {
+                           'cat' => 'stub',
+                           'name' => 'read_pipe',
+                           'args' => {
+                                       'dataInt0' => {
+                                                       'cat' => 'gmem',
+                                                       'name' => 'dataInt0',
+                                                       'type' => 'i32*'
+                                                     },
+                                       'ch00' => {
+                                                   'cat' => 'undefined',
+                                                   'name' => 'ch00',
+                                                   'type' => 'i32'
+                                                 }
+                                     }
+                         }
+        };

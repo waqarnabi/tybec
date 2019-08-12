@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root versionMajor="1" versionMinor="6">
+  <kernel name="sdx_kernel_wizard_0" language="ip_c" vlnv="mycompany.com:kernel:sdx_kernel_wizard_0:1.0" attributes="" preferredWorkGroupSizeMultiple="0" workGroupSize="1" interrupt="true">
+    <ports>
+      <port name="s_axi_control" mode="slave" range="0x1000" dataWidth="32" portType="addressable" base="0x0"/>
+      <port name="m00_axi" mode="master" range="0xFFFFFFFFFFFFFFFF" dataWidth="512" portType="addressable" base="0x0"/>
+    </ports>
+    <args>
+      <arg name="axi00_ptr0" addressQualifier="1" id="0" port="m00_axi" size="0x8" offset="0x010" hostOffset="0x0" hostSize="0x8" type="int*"/>
+      <arg name="axi00_ptr1" addressQualifier="1" id="1" port="m00_axi" size="0x8" offset="0x018" hostOffset="0x0" hostSize="0x8" type="int*"/>
+      <arg name="axi00_ptr2" addressQualifier="1" id="2" port="m00_axi" size="0x8" offset="0x020" hostOffset="0x0" hostSize="0x8" type="int*"/>
+      <arg name="axi00_ptr3" addressQualifier="1" id="3" port="m00_axi" size="0x8" offset="0x028" hostOffset="0x0" hostSize="0x8" type="int*"/>
+      <arg name="axi00_ptr4" addressQualifier="1" id="4" port="m00_axi" size="0x8" offset="0x030" hostOffset="0x0" hostSize="0x8" type="int*"/>
+      <arg name="axi00_ptr5" addressQualifier="1" id="5" port="m00_axi" size="0x8" offset="0x038" hostOffset="0x0" hostSize="0x8" type="int*"/>
+      <arg name="axi00_ptr6" addressQualifier="1" id="6" port="m00_axi" size="0x8" offset="0x040" hostOffset="0x0" hostSize="0x8" type="int*"/>
+      <arg name="axi00_ptr7" addressQualifier="1" id="7" port="m00_axi" size="0x8" offset="0x048" hostOffset="0x0" hostSize="0x8" type="int*"/>
+    </args>
+  </kernel>
+</root>

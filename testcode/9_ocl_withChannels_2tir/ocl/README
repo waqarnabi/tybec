@@ -1,0 +1,14 @@
+ver1:
++ Basic 4 stage pipeline, same as example used for MSc students' project.
++ channels passed as arguments
++ still using AOCL syntax
+
+ver2:
++ Same basic 4 stage pipeline as ver1
++ Channels declared in global scope
++ still using AOCL syntax
++ tested (but showing incomplete output as of 2019.07.22)
+
+ver3:?
++ try working with loops?
+

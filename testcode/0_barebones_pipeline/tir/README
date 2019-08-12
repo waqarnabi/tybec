@@ -1,0 +1,36 @@
+
+As of 2017.06.19: Versions that compile with TYBEC are
+ - ver 1
+
+Version 1:
+----------
+TIR-17, Baseline implementation with no splits, merges or ND operations. 
+All operations are  integer (single cycle)
+>> parse          > ok
+>> DFG            > ok
+>> analyze        > ok
+>> estimate       > ok
+>> generate-HDL   > ok
+>> test-HDL       > OK (2018.02.15)
+>> generate-OCL   > ok
+>> test-OCL       > ok (2018.03.10)
+
+Version 2: ---> See ../../3_barebones_pipeline_float
+----------
+Introducing floats (and fine-grained synchronization/buffer-inference).
+All else same as ver 1
+>> parse          > 
+>> DFG            > 
+>> analyze        > 
+>> estimate       > 
+>> generate-HDL   > 
+>> test-HDL       > 
+>> generate-OCL   > 
+>> test-OCL       > 
+
+
+
+
+
+
+ 

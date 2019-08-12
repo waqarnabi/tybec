@@ -1,0 +1,14 @@
+WN, Glasgow, 2019.07.01
+=======================
+
+This is the a modified version of zeroth test-case for TyBEC-17, to include branching (via select).
+
+BUILD & RUN (C and Fortran)
+------------
+0. cd ./c (./fortran)
+1. scons
+2. ./barebones.exe
+
+TIR VERSIONS
+------------
+See ./tir/README      

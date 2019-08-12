@@ -1,0 +1,266 @@
+;-- =============================================================================
+;-- Company      : Unversity of Glasgow, Comuting Science
+;-- Author:        Syed Waqar Nabi
+;-- 
+;-- Create Date  : 2014.11.03
+;-- Project Name : TyTra
+;--
+;-- Dependencies : 
+;--
+;-- Revision     : 
+;-- Revision 0.01.20141103: File Created
+;-- Revision 0.02.20190618: Updated for new tybec version (and tir syntax)
+;-- 
+;-- Conventions  : 
+;-- =============================================================================
+;--
+;-- =============================================================================
+;-- General Description
+;-- -----------------------------------------------------------------------------
+;-- Tytra-IR BACKEND file for SOR code from LES
+;--
+;-- ** Version 1 ** Fully pipelined
+;--
+;-- =============================================================================
+;--
+;-- C-style macros 
+#define NDim1  10
+  ;-- km
+#define NDim2  10
+  ;-- jm
+#define NDim3  10
+  ;-- im
+#define SIZE   (NDim1 * NDim2 * NDim3)
+
+#define data_t float32
+
+; -----------------------------------------------------------------------------
+; pow stub
+; -----------------------------------------------------------------------------
+define void @pow  ( data_t %out
+                  , data_t %in1
+                  , data_t %in2
+                  ) pipe 
+{
+  ;--this is just place-holder instruction to ensure connections are made
+  ;--TyBEC should recognize "pow" as intrinsic keyword/function, and generate the
+  ;--appropriate flopoco unit without lookiing inside this function
+  data_t %out = pow data_t %in1, %in2
+  ret void
+}
+
+; -----------------------------------------------------------------------------
+;-- sor_ker0
+; -----------------------------------------------------------------------------
+define void @sor_ker0 ( data_t %p_i_p1
+                      , data_t %p_i_n1
+                      , data_t %p_j_p1
+                      , data_t %p_j_n1
+                      , data_t %p_k_p1
+                      , data_t %p_k_n1
+                      , data_t %cn2l
+                      , data_t %cn2s
+                      , data_t %cn3l
+                      , data_t %cn3s
+                      , data_t %cn4l
+                      , data_t %cn4s
+                      , data_t %7
+                      , data_t %8
+                      , data_t %9
+                      ) pipe
+{
+  ;-- stage 0
+  ;--  TODO (Avoiding input stream of constant weighting factors
+  ;--  just for the prototype. Should have negligible impact on resources
+  ;--  and none on EWGT calculation, so should be ok for FPL?
+    ;-- should have instruction of this type: 
+    ;--  data_t %1 = data_t mul data_t %p_i_p1, CONST1 (actually input stream of constant)
+      ;-- from the perspective of this core, makes no differece whether stream is of constants or not
+  data_t %1 = mul data_t %p_i_p1, %cn2l
+  data_t %2 = mul data_t %p_i_n1, %cn2s
+  data_t %3 = mul data_t %p_j_p1, %cn3l
+  data_t %4 = mul data_t %p_j_n1, %cn3s
+  data_t %5 = mul data_t %p_k_p1, %cn4l
+  data_t %6 = mul data_t %p_k_n1, %cn4s
+  
+  ;-- stage 1
+  data_t %7 = add data_t %1, %2
+  data_t %8 = add data_t %3, %4
+  data_t %9 = add data_t %5, %6
+  
+  ret void
+}
+
+ 
+; -----------------------------------------------------------------------------
+;-- sor_ker1
+; -----------------------------------------------------------------------------
+define void @sor_ker1 ( data_t %7
+                      , data_t %8
+                      , data_t %9
+                      , data_t %rhs
+                      , data_t %12
+                      ) pipe
+{
+  ;-- stage 2
+  data_t %10 = add data_t %7, %8
+
+  ;-- stage 3
+  data_t %11 = add data_t %9, %10
+
+  ;-- stage 4
+  ;--WN: mod to include an iterative "pow" function, for DSE experiments
+  ;--data_t %12 = sub data_t %11,  %rhs
+  call @pow(data_t %12, data_t %11,  data_t %rhs)
+  ret void
+}
+
+
+; -----------------------------------------------------------------------------
+;-- sor_ker2
+; -----------------------------------------------------------------------------
+define void @sor_ker2 ( data_t %12
+                      , data_t %cn1
+                      , data_t %p
+                      , data_t %pOut
+                      ) pipe
+{
+  ;-- stage 5
+  data_t %13 = mul data_t %12, %cn1 
+
+  ;-- stage 6
+  data_t %14 = sub data_t %13, %p
+
+  ;-- stage 7
+  data_t %reltemp = mul data_t %14, %14 
+    ;--  OMEGA_CONST <-- TODO: one of the operands should be this SCALAR constant input
+    ;-- this is reltmp
+
+  ;-- stage 8
+  data_t %pOut      = add data_t %p, %reltemp
+  ;-- data_t %sorError  = mul data_t %reltemp, %reltemp
+  
+  ;-- stage 9 
+  ;-- reduction. Note the use of GLOBAL prefix '@' of LLVM to indicate that 
+  ;-- the destination operand is part of a reduction operation, so should 
+  ;-- retain value across calls (effectively a STATIC type in C-terms)
+    ;-- BUT, how to initialize the accumulator?
+    ;-- for now, use identity w.r.t the operation (0 for add, 1 for mul)
+  ;-- data_t @sorErrorCumulative = add data_t %sorError, %sorErrorCumulative
+  ret void
+}
+
+; -----------------------------------------------------------------------------
+;-- kernelTop
+; -----------------------------------------------------------------------------
+define void @kernelTop   ( data_t %p  
+;--                , data_t %sorError
+                        , data_t %rhs
+                        , data_t %cn1
+                        , data_t %cn2l
+                        , data_t %cn2s
+                        , data_t %cn3l
+                        , data_t %cn3s
+                        , data_t %cn4l
+                        , data_t %cn4s
+                        , data_t %pOut 
+                        ) pipe
+{
+  data_t %p_i_p1 = offstream %p, !tir.stream.offset !+1
+  data_t %p_i_n1 = offstream %p, !tir.stream.offset !-1
+  data_t %p_j_p1 = offstream %p, !tir.stream.offset !+NDim1
+  data_t %p_j_n1 = offstream %p, !tir.stream.offset !-NDim1
+  data_t %p_k_p1 = offstream %p, !tir.stream.offset !+NDim1*NDim2
+  data_t %p_k_n1 = offstream %p, !tir.stream.offset !-NDim1*NDim2
+
+  call @sor_ker0  ( data_t %p_i_p1
+                  , data_t %p_i_n1
+                  , data_t %p_j_p1
+                  , data_t %p_j_n1
+                  , data_t %p_k_p1
+                  , data_t %p_k_n1
+                  , data_t %cn2l
+                  , data_t %cn2s
+                  , data_t %cn3l
+                  , data_t %cn3s
+                  , data_t %cn4l
+                  , data_t %cn4s
+                  , data_t %7
+                  , data_t %8
+                  , data_t %9
+                  )
+
+  call @sor_ker1  ( data_t %7
+                  , data_t %8
+                  , data_t %9
+                  , data_t %rhs
+                  , data_t %12
+                  )
+
+  call @sor_ker2  ( data_t %12
+                  , data_t %cn1
+                  , data_t %p
+                  , data_t %pOut
+                  )
+
+
+  ret void
+}
+
+; ----------------------------------------------------------
+; -- ** MAIN
+; ----------------------------------------------------------
+
+;--The TyTra-IR is limited to the DEVICE-CODE on the kernel
+;--So while we do "declare" variables in the global-memory space
+;--we are not worried about initializing (or post-processing) them
+;--as that is assumed to happen outside the scope of this device-side
+;--program
+
+define void @main () {
+  ;-- MEMORY OBJECTS
+  ;-- in LLVM, all "memory objects" are accessed using pointers
+  ;-- addrspace(1) is the global address space, so these
+  ;-- arrays are created in the Global Memory
+  
+  ;-- note: Earlier I was using @ (globals) for global memories, but
+  ;--       I am changing that to % as I think there was no need for that differentiation
+  ;--@vin0 = addrspace(1) [SIZE x data_t]
+
+  %p    = alloca [SIZE x data_t], addrspace(1)
+  %rhs  = alloca [SIZE x data_t], addrspace(1)
+  %cn1  = alloca [SIZE x data_t], addrspace(1)
+  %cn2l = alloca [SIZE x data_t], addrspace(1) 
+  %cn2s = alloca [SIZE x data_t], addrspace(1) 
+  %cn3l = alloca [SIZE x data_t], addrspace(1) 
+  %cn3s = alloca [SIZE x data_t], addrspace(1) 
+  %cn4l = alloca [SIZE x data_t], addrspace(1) 
+  %cn4s = alloca [SIZE x data_t], addrspace(1) 
+  %pOut = alloca [SIZE x data_t], addrspace(1)      
+ 
+  ;-- streams from memories
+  %p_stream_load     = streamread data_t, data_t*  %p    , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  %rhs_stream_load   = streamread data_t, data_t*  %rhs  , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  %cn1_stream_load   = streamread data_t, data_t*  %cn1  , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  %cn2l_stream_load  = streamread data_t, data_t*  %cn2l , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  %cn2s_stream_load  = streamread data_t, data_t*  %cn2s , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  %cn3l_stream_load  = streamread data_t, data_t*  %cn3l , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  %cn3s_stream_load  = streamread data_t, data_t*  %cn3s , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  %cn4l_stream_load  = streamread data_t, data_t*  %cn4l , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1
+  %cn4s_stream_load  = streamread data_t, data_t*  %cn4s , !tir.stream.type   !stream1d , !tir.stream.size   !SIZE , !tir.stream.saddr  !0, !tir.stream.stride !1                                         
+  streamwrite data_t %pOut_stream_store, data_t* %pOut, !tir.stream.type   !stream1d, !tir.stream.saddr  !0, !tir.stream.size   !SIZE, !tir.stream.stride !1
+
+  ;--call the top level kernel and pass it the streams and the constant
+  call @kernelTop ( data_t %p_stream_load   
+                  , data_t %rhs_stream_load 
+                  , data_t %cn1_stream_load 
+                  , data_t %cn2l_stream_load
+                  , data_t %cn2s_stream_load
+                  , data_t %cn3l_stream_load
+                  , data_t %cn3s_stream_load
+                  , data_t %cn4l_stream_load
+                  , data_t %cn4s_stream_load
+                  , data_t %pOut_stream_store
+                  )
+  ret void
+}

@@ -1,0 +1,18 @@
+WN, Glasgow, 2019.06.13
+=======================
+
+/* ver1 */
++ single kernel (no CG pipeline)
++ may not be suitable for DSE at tytra-CL stage
+
+
+/* ver2 */
++ re-forest the SOR kernel, for finer-grained, multiple CG kernels
+
+/* ver3 */
++ Artificially inserting iterative units to test with Tytra-CL optimizations 
+(no longer functionally compatible with baseline C unless I make it)
+
+
+ 
+

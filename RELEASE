@@ -1,8 +1,37 @@
-TYBEC Release R16.0
-==================
-
-Date  : 2017.01.13
+TYBEC Release R17.x
+====================
+Date  : 2019.07.30 (on-going)
 By    : Waqar Nabi
+
+
+This is the on-going work on release 17.x; updated and committed to git for Hindawi Journal paper.
+It synchs with local SVN version: 11543
+
+This is not ready for public release. 
+
+
+=====================
+TYBEC Release History
+=====================
+
+TYBEC Release R16.2
+====================
+
+Date  : 2017.02.20
+By    : Waqar Nabi
+
+1. See changes made for 16.1. IIRC this is essentially the same with some minor updated and corrections. That is, this is the Tybev-16 final version, used RAW-JPDC.
+
+
+TYBEC Release R16.1
+====================
+1. Some on going changes in R16, concurrently with R17, for JPDC
+2. Updated the cost model for non-recurring cost of control transfer between host and device every time a kernel is invoked, after discussion with Wim. The JPDC-RAW estimates of SOR Maxeler case study based on this  update. More experiments are needed to ensure that this cost is 
+
+
+TYBEC Release R16.0
+=====================
+
 
 1. Strictly Internal release.
 
@@ -13,11 +42,6 @@ too though.
 
 4. This is the final "TIR-16" version before I make major changes for TIR-17 (i.e. merge manage and computer ir, new  syntax for accessing memories inside kernels, smart buffering)
 
-
-
-=====================
-TYBEC Release History
-=====================
 
 TYBEC Release 0.03
 ==================

@@ -1,0 +1,10 @@
+WN, Glasgow, 2019.06.19
+=======================
+
++ The Coriolis code is taken from Kampf text book.
++ It was manually converted to HDL back in 2014, and formed the basis of the TIR language.
++ That project is now obsolete, available in Work\MiniProj_Ocean_Coriolis
++ This branch now being developed as a test case (with Cordic functions) for tybec.
+
+
+

@@ -22,6 +22,7 @@
 # =============================================================================                        
 
 package HdlCodeGen;
+
 use strict;
 use warnings;
 
@@ -30,13 +31,14 @@ use File::Slurp;
 use File::Copy qw(copy);
 use List::Util qw(min max);
 use Term::ANSIColor qw(:constants);
-
+use Cwd;
 
 use Exporter qw( import );
 our @EXPORT = qw( $genCoreComputePipe );
 
 our $TyBECROOTDIR = $ENV{"TyBECROOTDIR"};
 
+our $singleLine ="// -----------------------------------------------------------------------------\n";
 
 # ============================================================================
 # Utility routines
@@ -47,6 +49,16 @@ sub log2 {
         return int( (log($n)/log(2)) + 0.99); #0.99 for CEIL operation
     }
 
+#This subroutine overwrites input string     
+sub remove_duplicate_lines {    
+      my %seen;
+      my @outbuff; 
+      my @lines = split /\n/, $_[0];
+      foreach my $line (@lines) {
+        push @outbuff, $line if !$seen{$line}++;   # print if a line is never seen before
+      }
+      $_[0] = join ("\n",@outbuff);
+}    
 # ============================================================================
 # Code Generation Lookups
 # ============================================================================
@@ -73,193 +85,59 @@ our %width4dtype;
 $width4dtype{ui18} = 18;
 
 
+
 # ============================================================================
-# GENERATE offset Stream ()
+# GENERATE AXI FIFO BUFFER
 # ============================================================================
 
-sub genOffsetStream {
-
+sub genAxiFifoBuffer {
   # --------------------------------
   # >>> ARGS
   # --------------------------------
-  my $fhGen       = $_[0];  #file handler for output file
-  my $modName     = $_[1];  #module_name
-  my $designName  = $_[2];  #design name
-  my $portName    = $_[3];  #name of port for which offsetStream is needed
-  my $maxPos      = $_[4];  #maximum positive offset required
-  my $maxNeg      = $_[5];  #maximum negative offset required
-  my @posOffsets  = @{$_[6]};  #array of required positive offsets
-  my @negOffsets  = @{$_[7]};  #array of required negative offsets
-
+  my  ($fhGen             #file handler for output file
+      ,$modName           #module_name
+      ,$designName
+      ,$outputRTLDir
+      ,$hashref
+      ,$vect
+      ) = @_; 
+      
+  my %hash        = %{$hashref};  #the hash from parsed code for this pipe function
+  my $synthunit   = 'fifobuf';
+  my $synthDtype  = $hash{synthDtype};
+  my $datat       = $synthDtype; #complete type (e.g i32)    
+  (my $dataw = $datat)     =~ s/\D*//g; #width in bits
+  (my $dataBase = $datat)  =~ s/\d*//g; #base type (ui, i, or float)
+  
+  my $buffSizeWords = $hash{bufferSizeWords};
+  my @tapsAtDelays  = @{$hash{tapsAtDelays}};
+  my $maxDelay      = $buffSizeWords;
+    
   # --------------------------------
   # >>>>> Locals
   # --------------------------------
   my $timeStamp   = localtime(time);
-  my $strBuf = ""; # temp string buffer used in code generation 
-
-  # --------------------------------
-  # >>>> Load template file
-  # --------------------------------
-  my $templateFileName = "$TyBECROOTDIR/hdlGenTemplates/offsetStream.template.v"; 
+  
+  #sring buffers for code-gen  
+  my $str_outputs         ="";
+  my $str_oreadys         ="";
+  my $str_oreadysAnd      = "assign oready = 1'b1\n";
+  my $str_ovalids         ="";
+  my $str_assign_ovalids  = "";
+  my $str_assign_dataouts = "";
+  my $str_shift_data_and_valid = "";
+  my $str_dont_shift_data_and_valid = "";
+  
+  # ---------------------------------------
+  # >>>> Load template file, read contents
+  # ---------------------------------------
+  my $templateFileName;
+  $templateFileName = "$TyBECROOTDIR/hdlGenTemplates/template.axiStreamBuff.v";
+  
   open (my $fhTemplate, '<', $templateFileName)
     or die "Could not open file '$templateFileName' $!"; 
 
-  # --------------------------------
-  # >>>> Read template contents into string
-  # --------------------------------
   my $genCode = read_file ($fhTemplate);
-
-  close $fhTemplate;
-
-  # --------------------------------
-  # >>>>> Update header and module name 
-  # --------------------------------
-  $genCode =~ s/<module_name>/$modName/g;
-  #genCode =~ s/<params>/$modName/g; <-- ? Got this from diff
-  $genCode =~ s/<design_name>/$designName/g;
-  $genCode =~ s/<gen_ver>/$main::tybecRelease/g;
-  $genCode =~ s/<timeStamp>/$timeStamp/g;
-
-  # --------------------------------
-  # >>>>> generate output ports
-  # --------------------------------
-
-  #for positive offsets
-  for (my $i=1; $i <= $maxPos; $i++) {
-    $strBuf = "$strBuf"
-            . "  , output [DataW-1:0] outP$i \n"
-  }
-  #for negative offsets
-  for (my $i=1; $i <= $maxNeg; $i++) {
-    $strBuf = "$strBuf"
-            . "  , output [DataW-1:0] outN$i \n"
-  }
-
-  $genCode =~ s/<ports>/$strBuf/g;
-  $strBuf = "";
-
-  # --------------------------------
-  # >>>>> replace maxPos and maxPos
-  # --------------------------------
-  $genCode =~ s/<maxPos>/$maxPos/g;
-  $genCode =~ s/<maxNeg>/$maxNeg/g;
-
-  # -------------------------------------------
-  # >>>>> connect output port to register bank
-  # -------------------------------------------
-  #for positive offsets
-  for (my $i=$maxPos; $i >= 0; $i--) {
-    $strBuf = "$strBuf"
-            . "assign outP$i = offsetRegBank[".($maxPos-$i)."]; "
-            . "//<-- +$i \n";
-  }
-
-  #for negative offsets
-  for (my $i=1; $i <= $maxNeg; $i++) {
-    $strBuf = "$strBuf"
-            . "assign outN$i = offsetRegBank[".($maxPos+$i)."]; "
-            . "//<-- +$i \n";
-  }
-
-  $genCode =~ s/<port2regConnections>/$strBuf/g;
-  $strBuf = "";
-  
-  # -------------------------------------------
-  # >>>>> create the shifting logic in the reg-bank
-  # -------------------------------------------
-  $strBuf = "$strBuf"
-          . "always @(posedge clk) begin \n"
-          . "  offsetRegBank[0]  <= in; \n";
-
-  #loop through the entire buffer, and shift
-  for (my $i=1; $i <= ($maxPos+$maxNeg); $i++) {
-    $strBuf = "$strBuf"
-            . "  offsetRegBank[$i"."]  <="
-            . "  offsetRegBank[".($i-1)."]; \n";
-  }
-
-  $strBuf = "$strBuf"
-          . "end";
-
-  $genCode =~ s/<shiftRegister>/$strBuf/g;
-  $strBuf = "";
-
-
-#always @(posedge clk) begin
-#  offsetRegBank[0]  <= in;                    //<--+12 
-#  offsetRegBank[1]  <= offsetRegBank[0] ;   
-#  offsetRegBank[2]  <= offsetRegBank[1] ;   
-#  offsetRegBank[3]  <= offsetRegBank[2] ;   
-#  offsetRegBank[4]  <= offsetRegBank[3] ;   
-#  offsetRegBank[5]  <= offsetRegBank[4] ;   
-#  offsetRegBank[6]  <= offsetRegBank[5] ;   
-#  offsetRegBank[7]  <= offsetRegBank[6] ;   
-#  offsetRegBank[8]  <= offsetRegBank[7] ;   
-#  offsetRegBank[9]  <= offsetRegBank[8] ;   
-#  offsetRegBank[10] <= offsetRegBank[9] ;   
-#  offsetRegBank[11] <= offsetRegBank[10]; //<-- +1  
-#  offsetRegBank[12] <= offsetRegBank[11]; //<-- 0   
-#  offsetRegBank[13] <= offsetRegBank[12]; //<-- -1  
-#  offsetRegBank[14] <= offsetRegBank[13];   
-#  offsetRegBank[15] <= offsetRegBank[14];   
-#  offsetRegBank[16] <= offsetRegBank[15];   
-#  offsetRegBank[17] <= offsetRegBank[16];   
-#  offsetRegBank[18] <= offsetRegBank[17];   
-#  offsetRegBank[19] <= offsetRegBank[18];   
-#  offsetRegBank[20] <= offsetRegBank[19];   
-#  offsetRegBank[21] <= offsetRegBank[20];   
-#  offsetRegBank[22] <= offsetRegBank[21];   
-#  offsetRegBank[23] <= offsetRegBank[22];   
-#  offsetRegBank[24] <= offsetRegBank[23]; //<-- -12   
-#end 
-
-
-  
-  # --------------------------------
-  # >>>>> Write to file
-  # --------------------------------
-  $genCode =~ s/\r//g; #to remove the ^M  
-  print $fhGen $genCode;
-  
-  print "TyBEC: Generated module $modName \n";
-  
-  return;
-}#genOffsetStream 
-
-# ============================================================================
-# GENERATE Custom COMBinational modules (for comb functions)
-# ============================================================================
-
-sub genCustomComb {
-
-  # --------------------------------
-  # >>> ARGS
-  # --------------------------------
-  my $fhGen       = $_[0];  #file handler for output file
-  my $modName     = $_[1];  #module_name
-  my $designName  = $_[2];  #design name
-  my %fHash       = %{$_[3]};  #the hash for the  parsed COMB function  
-
-  my $outPort; #name of output port extracted and stored here, for use in elimination of its wire declaration
-  
-  # --------------------------------
-  # >>>>> Locals
-  # --------------------------------
-  my $timeStamp   = localtime(time);
-  my $strBuf = ""; # temp string buffer used in code generation 
-
-  # --------------------------------
-  # >>>> Load template file
-  # --------------------------------
-  my $templateFileName = "$TyBECROOTDIR/hdlGenTemplates/CustomComb.template.v"; 
-  open (my $fhTemplate, '<', $templateFileName)
-    or die "Could not open file '$templateFileName' $!"; 
-
-  # --------------------------------
-  # >>>> Read template contents into string
-  # --------------------------------
-  my $genCode = read_file ($fhTemplate);
-
   close $fhTemplate;
 
   # --------------------------------
@@ -271,165 +149,123 @@ sub genCustomComb {
   $genCode =~ s/<timeStamp>/$timeStamp/g;
 
   # -------------------------------------------------------
-  # >>>>> Generate parameter list and default values
+  # >>>>> DATAW/STREAMW parameters
   # -------------------------------------------------------
-  # foreach my $key (keys %{$fHash{args}}) {   
-  #   my $name = $fHash{args}{$key}{name}; #reduce clutter    
-  #   
-  #   # inputs
-  #   if($fHash{args}{$key}{dir} eq 'input') {
-  #     $strBuf = "$strBuf"
-  #             . "  , parameter SIG_$name"."_W = 32\n"
-  #   }#if
-  #   
-  #   # outputs; treated same for now, but may need differentiation      
-  #   else {
-  #     $strBuf = "$strBuf"
-  #             . "  , parameter SIG_$name"."_W = 32\n"
-  #   }#else 
-  # }#foreach
-  # $genCode =~ s/<params>/$strBuf/g;
-  # $strBuf = "";
+  my $streamw;
+  if($dataBase eq 'float')  {$streamw=$dataw+2;}
+  else                      {$streamw=$dataw;}
 
-  # ------------------------------------
-  # >>>>> create inputs and output ports
-  # ------------------------------------
-  foreach my $key (keys %{$fHash{args}}) {
-    my $name = $fHash{args}{$key}{name}; #reduce clutter    
-    my $width = $width4dtype{$fHash{args}{$key}{type}}; #pick up width for data type
+  $genCode =~ s/<dataw>/$dataw/g;
+  $genCode =~ s/<streamw>/$streamw/g;
+  $genCode =~ s/<size>/$buffSizeWords/g;
+      
+  # -------------------------------------------------------
+  # >>>>> output taps
+  # -------------------------------------------------------
+  #code required for each output tap
+  my $tcount = 0;
+  foreach my $tap (@tapsAtDelays) {
+    #number each tap consecutively from 1 and up (for compatibility with over generation rules)
+    $tcount++;
     
-    #create input ports
-    if($fHash{args}{$key}{dir} eq 'input') {
-      $strBuf = "$strBuf"."  , "
-              . "input   [$width"."-1:0] sig_$name"."_pre\n";
-    }#if
-    #create output  port (only 1 allowed. Store its name for later eliminating its wire declaration)
-    else {
-      $strBuf = "$strBuf"."  , "
-              . "output  [$width"."-1:0] sig_$name\n";
-      $outPort = $name;
-              
-    }#else 
-  }#foreach
-  $genCode =~ s/<ports>/$strBuf/g;
-  $strBuf = "";
-
-  # ------------------------------------
-  # >>>>> create inputs registers AND
-  # >>>>> registering logic
-  # ------------------------------------
-  foreach my $key (keys %{$fHash{args}}) {
-    my $name = $fHash{args}{$key}{name}; #reduce clutter    
-    my $width = $width4dtype{$fHash{args}{$key}{type}}; #pick up width for data type
-
-
-    #only relevant for inputs
-    if($fHash{args}{$key}{dir} eq 'input') {
-      $strBuf = "$strBuf\n"
-        . "reg [$width"."-1:0] sig_$name".";\n"
-        . "always @(posedge clk)\n"
-        . "  sig_$name"." <= sig_$name"."_pre;\n";
-    }#if
-  }#foreach
-  $genCode =~ s/<inputRegisters>/$strBuf/g;
-  $strBuf = "";
-
-  # --------------------------------
-  # >>>>>> create combinational logic
-  # --------------------------------    
-  my $op   ;
-  my $dType;
-  my $oper1;
-  my $oper2;
-  my $operD;
-
-  # Iterate through the hash, sorted on the basis of instruction sequence
-  # See http://perlmaven.com/how-to-sort-a-hash-in-perl on how it was done
+    $str_outputs        .= "  , output     [STREAMW-1:0]  out$tcount"."_s0 // at delay = $tap \n";
+    $str_oreadys        .= "  , input                     oready_out$tcount"."_s0\n";
+    $str_oreadysAnd     .= "  & oready_out$tcount"."_s0\n";
+    $str_ovalids        .= "  , output                    ovalid_out$tcount"."_s0\n";
+    $str_assign_ovalids .= "assign ovalid_out$tcount"."_s0 = valid_shifter[$tap-1] & ivalid_in1_s0;\n";
+    $str_assign_dataouts.= "assign out$tcount"."_s0 = offsetRegBank[$tap-1]; // at delay = $tap \n";
+  }
   
-  foreach my $key (
-      sort { $fHash{instructions}{$a}{instrSequence} <=> $fHash{instructions}{$b}{instrSequence} } 
-      keys %{$fHash{instructions}}) {
-    # get the type of op and the data type, and operands from hash of instruction
-    $op    = $fHash{instructions}{$key}{op};
-    $dType = $fHash{instructions}{$key}{destType}; #the destination type is important
-    $oper1 = $fHash{instructions}{$key}{oper1}; 
-    $oper2 = $fHash{instructions}{$key}{oper2}; 
-    $operD = $key;
-    
-    ## lookup the appropriate functional unit for this combination of op and opType
-    #my $fu =  $mod4op{$op}{$dType};
-    
-    # lookup the appropriate combinational connector for the operation
-    my $conn =  $conn4op{$op};
-    
-    # lookup the appropriate signal width for the destination type
-    my $width = $width4dtype{$dType};
-
-    # now add the code assign statement that creates the logic for the instruction
-    #  check if destination is actually an output port, in which case its WIRE declaration has
-    #  to be bypassed, and ASSIGN used
-    # TODO: The "DataW" parameter is a cop-out, as it should correspond to the 
-    # data type of the destination...
-    if ($operD eq $outPort) {
-      $strBuf 
-        = "$strBuf \n"
-        . "assign sig_$operD"
-        . " = sig_$oper1"."  $conn  "."sig_$oper2".";\n";
-    }#if
-    else {
-      $strBuf 
-        = "$strBuf \n"
-        . "wire [$width"."-1:0] sig_$operD"
-        . " = sig_$oper1"."  $conn  "."sig_$oper2".";\n";
-    }
-  }#foreach   
+  #create the shift register for data and valid
+  #template already has code for $d = 0
+  foreach my $d (1..$maxDelay-1) {
+    $str_shift_data_and_valid      .= "    offsetRegBank[$d]  <=  offsetRegBank[$d-1];\n"; 
+    $str_shift_data_and_valid      .= "    valid_shifter[$d]  <=  valid_shifter[$d-1];\n"; 
+    $str_dont_shift_data_and_valid .= "    offsetRegBank[$d]  <=  offsetRegBank[$d];\n"; 
+    $str_dont_shift_data_and_valid .= "    valid_shifter[$d]  <=  valid_shifter[$d];\n"; 
+  }
   
-  $genCode =~ s/<combLogic>/$strBuf/g;
-  $strBuf = "";
-
+  $str_oreadysAnd .= "  ;";
   # --------------------------------
   # >>>>> Write to file
   # --------------------------------
+  $genCode =~ s/<outputs>/$str_outputs/g;
+  $genCode =~ s/<oreadys>/$str_oreadys/g;
+  $genCode =~ s/<oreadysAnd>/$str_oreadysAnd/g;
+  $genCode =~ s/<ovalids>/$str_ovalids/g;
+  $genCode =~ s/<assign_ovalids>/$str_assign_ovalids/g;
+  $genCode =~ s/<assign_dataouts>/$str_assign_dataouts/g;
+  $genCode =~ s/<shift_data_and_valid>/$str_shift_data_and_valid/g;
+  $genCode =~ s/<dont_shift_data_and_valid>/$str_dont_shift_data_and_valid/g;
   $genCode =~ s/\r//g; #to remove the ^M  
   print $fhGen $genCode;
   
-  print "TyBEC: Generated combinational logic module $modName for TyTra-IR function $fHash{funcName}\n";
-  
-  return;
+  print "TyBEC: Generated module $modName\n";  
 } 
 
 # ============================================================================
-# GENERATE Compute-Pipe  (leaf PIPES only)
+# GENERATE AXI _STENCIL_ BUFFER
 # ============================================================================
 
-sub genComputePipe {
-
+sub genAxiStencilBuffer {
   # --------------------------------
   # >>> ARGS
   # --------------------------------
-  my $fhGen       = $_[0];  #file handler for output file
-  my $modName     = $_[1];  #module_name
-  my $designName  = $_[2];  #design name
-  my %fHash       = %{$_[3]};  #the hash from parsed code for this pipe function
-
+  my  ($fhGen             #file handler for output file
+      ,$modName           #module_name
+      ,$designName
+      ,$outputRTLDir
+      ,$hashref
+      ,$vect
+      ) = @_; 
+      
+  my %hash        = %{$hashref};  #the hash from parsed code for this pipe function
+  my $synthunit   = 'smache';
+  my $synthDtype  = $hash{synthDtype};
+  my $datat       = $synthDtype; #complete type (e.g i32)    
+  (my $dataw = $datat)     =~ s/\D*//g; #width in bits
+  (my $dataBase = $datat)  =~ s/\d*//g; #base type (ui, i, or float)
+  my $maxP = $hash{maxPosOffset};
+  my $maxN = $hash{maxNegOffset};
+  my $buffSizeWords = $maxP + $maxN + 1;
+  #for left-to-right streaming shift register (LS word has latest/highest pos index)
+  # so for offset:
+  #k      @ buff[maxP-k]
+  #so
+  #0      @ buff[maxP]
+  #+maxP  @ buff[0]
+  #-maxN  @ buff[maxP+maxN]
+  my $ind_0 = $maxP;
+  
+  my @tapsAtPosDelays  = @{$hash{tapsAtPosDelays}};
+  my @tapsAtNegDelays  = @{$hash{tapsAtNegDelays}};
+  my $maxDelay      = $buffSizeWords;
+    
   # --------------------------------
   # >>>>> Locals
   # --------------------------------
   my $timeStamp   = localtime(time);
-  my $strBuf = ""; # temp string buffer used in code generation 
-
-  # --------------------------------
-  # >>>> Load template file
-  # --------------------------------
-  my $templateFileName = "$TyBECROOTDIR/hdlGenTemplates/ComputePipe.template.v"; 
+  
+  #sring buffers for code-gen  
+  my $str_outputs         ="";
+  my $str_oreadys         ="";
+  my $str_oreadysAnd      = "assign oready = 1'b1\n";
+  my $str_ovalids         ="";
+  my $str_assign_ovalids  = "";
+  my $str_assign_dataouts = "";
+  my $str_shift_data_and_valid = "";
+  my $str_dont_shift_data_and_valid = "";
+#  
+  # ---------------------------------------
+  # >>>> Load template file, read contents
+  # ---------------------------------------
+  my $templateFileName;
+  $templateFileName = "$TyBECROOTDIR/hdlGenTemplates/template.axiStencilBuff.v";
+  
   open (my $fhTemplate, '<', $templateFileName)
     or die "Could not open file '$templateFileName' $!"; 
 
-  # --------------------------------
-  # >>>> Read template contents into string
-  # --------------------------------
   my $genCode = read_file ($fhTemplate);
-
   close $fhTemplate;
 
   # --------------------------------
@@ -441,411 +277,252 @@ sub genComputePipe {
   $genCode =~ s/<timeStamp>/$timeStamp/g;
 
   # -------------------------------------------------------
-  # >>>>> Generate parameter list and default values
+  # >>>>> DATAW/STREAMW parameters
   # -------------------------------------------------------
-  foreach my $key (keys %{$fHash{args}}) {   
-    (my $name = $fHash{args}{$key}{name}) =~ s/[\@\%]+//g; 
-      #reduce clutter, get the name of arg minus % r @
-    
-    # input streams
-    if($fHash{args}{$key}{dir} eq 'input') {
-      $strBuf = "$strBuf"
-              . "  , parameter STRM_$name"."_W            = 32\n"
-    }#if
-    
-    # output streams; treated same for now, but may need differentiation      
-    else {
-      $strBuf = "$strBuf"
-              . "  , parameter STRM_$name"."_W            = 32\n"
-    }#else 
-  }#foreach
-  $genCode =~ s/<params>/$strBuf/g;
-  $strBuf = "";
+  my $streamw;
+  if($dataBase eq 'float')  {$streamw=$dataw+2;}
+  else                      {$streamw=$dataw;}
 
-  # --------------------------------
-  # >>>>> create inputs and output STREAMING ports
-  # --------------------------------
-  foreach my $key (keys %{$fHash{args}}) {
-    (my $name = $fHash{args}{$key}{name}) =~ s/[\@\%]+//g; 
-
-    #create input streaming ports
-    if($fHash{args}{$key}{dir} eq 'input') {
-      $strBuf = "$strBuf \n"
-              . "  , "
-              . "input\t[STRM_$name"."_W-1:0] strm_"
-              . $name;
-      #check if this input stream has any associated offSets, which case
-      #they need to be connected to the child as well
-      if (exists $fHash{args}{$key}{offSets}) {
-        foreach my $keyOffset (keys %{$fHash{args}{$key}{offSets}}) {
-          $keyOffset =~ s/[\@\%]+//g;
-          $strBuf = "$strBuf \n"
-                  . "  , "
-                  . "input\t[STRM_$name"."_W-1:0] strm_$keyOffset";  
-        }#foreach
-      }#if
-    }#if
-    #create output streaming ports
-    else {
-      $strBuf = "$strBuf \n"
-              . "  , "
-              . "output\t[STRM_$name"."_W-1:0] strm_"  
-              . $name;
-    }#else 
-  }#foreach
-  $genCode =~ s/<streamingPorts>/$strBuf/g;
-  $strBuf = "";
-
-  # --------------------------------
-  # >>>>>> create pipeline stages
-  # --------------------------------
-  my $sCount = 0  ; # stage count. value from HASH via autoparallelize function
+  $genCode =~ s/<dataw>/$dataw/g;
+  $genCode =~ s/<streamw>/$streamw/g;
+  $genCode =~ s/<size>/$buffSizeWords/g;
+      
+  # -------------------------------------------------------
+  # >>>>> output taps
+  # -------------------------------------------------------
+  # other than calculation of buffer address, code gen is same
+  # for positive or negative offsets
+  # name of output ports in smache, unlike other _leaf_ nodes, is _not_ generic (out1, out2...)
+  # Instead, like hierarchical nodes, the output port name is same as the connectio name (that is, the identifier of the
+  # stream it is producing
   
-  my $fuCount = 0; 
-    #count of functional unit (to give unique names)
-    #only sCount will not suffice as there may be multiple FUs in a stage
+  foreach my $offstream (keys %{$hash{offstreams}}) {
+    my $dist    = $hash{offstreams}{$offstream}{dist};
+    my $dir     = $hash{offstreams}{$offstream}{dir};
     
-  my $op   ;
-  my $dType;
-  my $oper1;
-  my $oper2;
-  my $operD;
-  my $operDtype;
-
-
-  # To identify pipeline stages, we need to iterate through the instructions
-  # So iterate through the hash, but sorted on the basis of instruction sequence
-  # See http://perlmaven.com/how-to-sort-a-hash-in-perl on how it was done
+    $offstream =~ s/(%|@)//g; 
+    my $bufAddr;
+    $bufAddr = $maxP-$dist if ($dir eq '+');
+    $bufAddr = $maxP+$dist if ($dir eq '-');
+    
+    $str_outputs        .= "  , output     [STREAMW-1:0]  $offstream"."_s0\n ";
+    $str_oreadys        .= "  , input                     oready_$offstream"."_s0\n";
+    $str_oreadysAnd     .= "  & oready_$offstream"."_s0\n";
+    $str_ovalids        .= "  , output                    ovalid_$offstream"."_s0\n";
+    $str_assign_ovalids .= "assign ovalid_$offstream"."_s0 = valid_shifter[$maxP] & ivalid_in1_s0;\n";
+      #the output is "valid" when the maximum POSITIVE offset is in (and thus the *current index* is now at 0)
+      #if, at this point, you try to generate and access and _negative_ offsets, you will get garbage values
+      #as the current index is at 0, and negative indices dont exist
+      #boundary conditions in the subsequent nodes should take care of this (OR, we can emit strobe signals 
+      #from the smache
+    $str_assign_dataouts.= "assign $offstream"."_s0 = offsetRegBank[$bufAddr];\n";    
+  }
   
-  #in order to go through the instructions hash in sequence, (and because getting bug when doing
-  #the sort access as described in the above comment), I make a loop from 0 to NumInstructions-1,
-  #and then pick up the instruction for THAT sequence, and then generate code for it.
-  #that ensures code is generated in the right sequence in the verilog file...
+#OBSOLETE loops  
+#  foreach my $tap (@tapsAtPosDelays) {
+#    #$tcount++;
+#    my $bufAddr = $maxN+$tap;
+#    $str_outputs        .= "  , output     [STREAMW-1:0]  out_p_$tap"."_s0\n ";
+#    $str_oreadys        .= "  , input                     oready_out_p_$tap"."_s0\n";
+#    $str_oreadysAnd     .= "  & oready_out_p_$tap"."_s0\n";
+#    $str_ovalids        .= "  , output                    ovalid_out_p_$tap"."_s0\n";
+#    $str_assign_ovalids .= "assign ovalid_out_p_$tap"."_s0 = valid_shifter[$maxDelay-1] & ivalid_in1_s0;\n";
+#    $str_assign_dataouts.= "assign out_p_$tap"."_s0 = offsetRegBank[$bufAddr];\n";
+#  }
+#  
+#  foreach my $tap (@tapsAtNegDelays) {
+#    #$tcount++;
+#    my $bufAddr = $maxN-$tap;
+#    $str_outputs        .= "  , output     [STREAMW-1:0]  out_n_$tap"."_s0\n ";
+#    $str_oreadys        .= "  , input                     oready_out_n_$tap"."_s0\n";
+#    $str_oreadysAnd     .= "  & oready_out_n_$tap"."_s0\n";
+#    $str_ovalids        .= "  , output                    ovalid_out_n_$tap"."_s0\n";
+#    $str_assign_ovalids .= "assign ovalid_out_n_$tap"."_s0 = valid_shifter[$maxDelay-1] & ivalid_in1_s0;\n";
+#    $str_assign_dataouts.= "assign out_n_$tap"."_s0 = offsetRegBank[$bufAddr];\n";
+#  }
+
+  #create the shift register for data and valid
+  #template already has code for $d = 0
+  foreach my $d (1..$maxDelay-1) {
+    $str_shift_data_and_valid      .= "    offsetRegBank[$d]  <=  offsetRegBank[$d-1];\n"; 
+    $str_shift_data_and_valid      .= "    valid_shifter[$d]  <=  valid_shifter[$d-1];\n"; 
+    $str_dont_shift_data_and_valid .= "    offsetRegBank[$d]  <=  offsetRegBank[$d];\n"; 
+    $str_dont_shift_data_and_valid .= "    valid_shifter[$d]  <=  valid_shifter[$d];\n"; 
+  }
   
-  
-  for (my $i = 0; $i < $fHash{instrCount} ; $i++) {
-    
-    #find the instruction key that goes with the current instrSequence
-    my $key;
-    foreach my $tempkey (keys %{$fHash{instructions}}) {
-      if($fHash{instructions}{$tempkey}{instrSequence} == $i) {
-        $key = $tempkey; }
-    }#foreach    
-     
-    #now that $key holds the correct instruction key for the current sequence $i, 
-    # we just continue as before (i.e. generate code for this key)
-    #note the previous loop header commented out
-        #foreach my $key (
-        #  #  sort { $fHash{instructions}{$a}{instrSequence} <=> $fHash{instructions}{$b}{instrSequence} } 
-        #  # TODO: check why this sorting is causing invalid access problems... 
-        #    keys %{$fHash{instructions}}) {
-        #
-        
-    #if function call instructions (can only be of type COMB - assumed, not checked) 
-    #--------------------------------------------------------------------------------
-    if($fHash{instructions}{$key}{instrType} eq 'funcCall') {
-    
-      #destination operand 
-      ($operD  = $fHash{instructions}{$key}{operD}) =~ s/[\@\%]+//g; 
-      
-      #destination operand's type (dest  operand is always at 0th position in the arg list)
-      $operDtype = $fHash{instructions}{$key}{args2child}{0}{type};
-      
-      #get the name of the child function (remove .N from name of  instruction)
-      (my $childFuncName = $key) =~ s/\.\d+//;
-           
-      #get the stage count based on the autoparallelization run, where each 
-      #instruction has already been assigned a stage in the pipeline
-      #$sCount = $fHash{parExecInstWise}{$operD};
-      $sCount = $fHash{parExecInstWise}{$key};
-    
-      # now start instantiating the child module for the child COMB function called 
-      # unless destination is actually a port,  wire declaration IS needed. check!
-      if($fHash{instructions}{$key}{writes2port} eq 'no') {
-        $strBuf 
-          = "$strBuf \n"
-          . "wire [DataW-1:0] strm_$operD;\n"
-      }
-      #Instantiate the combinatorial module
-      $strBuf 
-        = "$strBuf \n"
-        . "// --- Custom module in stage $sCount for $childFuncName ----\n"
-        #. "wire [DataW-1:0] strm_$operD;\n"
-        . "CustomComb_$childFuncName  CombModule_$fuCount (\n" 
-        . "   .clk   (clk)\n";
-        
-      # now loop through the arguments passed to child function, and make connections
-      foreach my $key2 (keys %{$fHash{instructions}{$key}{args2child}}) {
-        (my $nameChildPort = $fHash{instructions}{$key}{args2child}{$key2}{nameChildPort}) =~ s/[\@\%]+//g; 
-        (my $nameParentSig = $fHash{instructions}{$key}{args2child}{$key2}{name}) =~ s/[\@\%]+//g; 
-        
-        #for input ports
-        if($fHash{instructions}{$key}{args2child}{$key2}{dir} eq 'input') {
-          $strBuf 
-            = "$strBuf"
-            . "  ,.sig_$nameChildPort"."_pre   (strm_$nameParentSig".")\n";
-        }
-        #for output ports 
-        else {
-          $strBuf 
-            = "$strBuf"
-            . "  ,.sig_$nameChildPort"."       (strm_$nameParentSig".")\n";
-        }
-      }#foreach
-      
-      #conclude instantiation of customCOMb child module
-      $strBuf 
-        = "$strBuf".");\n";
-      
-      $fuCount++;  
-    }#if function call instruction
-    
-    
-    #all non-function-call (compute) instructions
-    #----------------------------------------------------
-    else {
-      # get the type of op and the data type, and operands from hash of instruction
-      $op    = $fHash{instructions}{$key}{op};
-      $dType = $fHash{instructions}{$key}{opType};
-      ($oper1 = $fHash{instructions}{$key}{oper1})=~ s/[\@\%]+//g;  
-      ($oper2 = $fHash{instructions}{$key}{oper2})=~ s/[\@\%]+//g;  
-      ($operD = $fHash{instructions}{$key}{operD})=~ s/[\@\%]+//g; 
-      
-      #get the stage count based on the autoparallelization run, where each 
-      #instruction has already been assigned a stage in the pipeline
-      $sCount = $fHash{parExecInstWise}{$key};
-      
-      # data delay lines 
-      #-----------------
-      #1. any of the operands refers to an input stream directly AND
-      #2. this is a non-zero pipeline stage. 
-      # This means that we need
-      # to insert delay-lines so that argument value is coherent
-      if($sCount >= 1) {
-        #operand 1 is a direct port connections
-        if($fHash{instructions}{$key}{oper1form} eq 'inPort') {
-          my $i_start; 
-            #we may not need to start the delay lines from the first stage
-          
-          #first off, see if a delay buffer for this port-argument has never been 
-          #generated, indicated by the key for oper being  being non-existent
-          # in the dataDelayLinesMaxZ hash
-          # in such a case, we are starting off from 0th stage
-          if(!(exists $fHash{dataDelayMaxZ}{$oper1})) {
-            #create a duplicate wire with _z0 appended so that 
-            #the loop is uniform
-            $strBuf = "$strBuf"
-                    . "//rename $oper1 \n"
-                    . "wire [DataW-1:0] strm_$oper1"."_z0 = strm_$oper1;\n";
-            
-            #the delay line generation starts from first stage onwards
-            $i_start = 1;
-          }#if
-          #else, the situation that a delay line has already been defined,
-            #but its Z is less than what we need, so we start
-            #delay line creation from the previous max value
-          elsif ($fHash{dataDelayMaxZ}{$oper1} < $sCount)
-            { $i_start = $fHash{dataDelayMaxZ}{$oper1}+1; }
-          # if oper1maxZ is already defined and the already generated maxZ is greater than the Z
-          # required for THIS instruction, then set i_start to sCount so
-          # that the generation loop does not run at all
-          else
-            { $i_start = $sCount+1; }
-
-          #delay line generation loop:
-          #loop from i_start determined earlier
-          #till you get to current stage, and create a delay line for each stage
-          for (my $i=$i_start; $i <= $sCount; $i++) {
-            $strBuf 
-              = "$strBuf \n"
-              . "// ------ DATA delay line for strm_$oper1, stage $i ------\n"
-              . "wire [DataW-1:0] strm_$oper1"."_z".$i.";\n"
-              . "delayline_z1 #(DataW) DL$oper1$i "
-              . "(clk, strm_$oper1"."_z".$i.", strm_$oper1"."_z".($i-1)." ); \n";
-              
-            #add to cost!
-            #HACK! -- this should happen at the estimate phase? 
-            (my $toadd = $dType) =~ s/^\D+//g;
-            $main::CODE{launch}{cost}{REGS} += $toadd;  
-          }
-          
-          #update the hash to indicate the max delayed value that has been generated
-          #for this particular port/argument
-          #in case a delayed value is needed again, in which case we check against this
-          #value to see of any further delay stages need to be added
-          #$main::CODE{$fHash{funcName}}{dataDelayMaxZ}{$oper1} = $sCount;
-          $fHash{dataDelayMaxZ}{$oper1} = $sCount;
-
-          #update the value of $oper1 with the delayed version, so that correct code is generated
-          $oper1 = $oper1."_z".$sCount;
-          
-        }#if
-    
-        #now do the same for port 2. i.e. if port 2 is a direct port connection
-        if($fHash{instructions}{$key}{oper2form} eq 'inPort') {
-          my $i_start; 
-          if(!(exists $fHash{dataDelayMaxZ}{$oper2})) {
-            $strBuf = "$strBuf"
-                    . "//rename $oper2 \n"
-                    . "wire [DataW-1:0] strm_$oper2"."_z0 = strm_$oper2;\n";
-            $i_start = 1;
-          }#if
-          elsif ($fHash{dataDelayMaxZ}{$oper2} < $sCount)
-            { $i_start = $fHash{dataDelayMaxZ}{$oper2}; }
-          else
-            { $i_start = $sCount+1; }
-
-          for (my $i=$i_start; $i <= $sCount; $i++) {
-            $strBuf 
-              = "$strBuf \n"
-              . "// ------ DATA delay line for strm_$oper2, stage $i ------\n"
-              . "wire [DataW-1:0] strm_$oper2"."_z".$i.";\n"
-              . "delayline_z1 #(DataW) DL$oper2$i "
-              . "(clk, strm_$oper2"."_z".$i.", strm_$oper2"."_z".($i-1)." ); \n";
-            #add to cost!
-            #HACK! -- this should happen at the estimate phase? 
-            (my $toadd = $dType) =~ s/^\D+//g;
-            $main::CODE{launch}{cost}{REGS} += $toadd;     
-          }
-          #$main::CODE{$fHash{funcName}}{dataDelayMaxZ}{$oper2} = $sCount;
-          $fHash{dataDelayMaxZ}{$oper2} = $sCount;
-          $oper2 = $oper2."_z".$sCount;
-        }#if
-      }#if($sCount >= 1) {
-
-      #generate the pipelined unit
-      #-----------------------------
-      # lookup the appropriate functional unit for this combination of op and opType
-      my $fu =  $mod4op{$op}{$dType};
- 
-      #if this is a redux instruction, then re-define operands accordingly
-      #one operand is the one that is not the accumulator - AS -IS
-      #the other is the accumulator operand, with _r appended for its registers ver which is fed back
-      if($fHash{instructions}{$key}{instrType} eq 'reduction') {
-        ($oper1 = $fHash{instructions}{$key}{operNotAcc})=~ s/[\@\%]+//g; 
-        ($oper2 = $fHash{instructions}{$key}{operD})=~ s/[\@\%]+//g; 
-        $oper2 = $oper2."_r";
-      }
-      
-      # now append the code for local wire, pipeline unit, and the delay lines
-      # in the temporary buffer
-      
-      $strBuf = "$strBuf \n"
-        . "// -------- Pipeline Stage $sCount -----------\n"
-        . "// Pipelined unit for this stage\n";
-
-      # unless destination is actually a port,  wire declaration IS needed. check!
-      if($fHash{instructions}{$key}{writes2port} eq 'no') {
-        $strBuf = "$strBuf \n"
-          . "wire [DataW-1:0] strm_$operD;\n";
-      }
-      
-      #if this is **redux** operation, then create accumulation register and logic
-      if($fHash{instructions}{$key}{instrType} eq 'reduction') {
-        $strBuf = "$strBuf \n"                                                
-          . "reg  [DataW-1:0] strm_$operD"."_r;       \n"
-          . "                                         \n"
-          . "always @(posedge clk) begin              \n"
-          . "  if (rst)                               \n"
-          . "    strm_$operD"."_r  <= 0;              \n"
-          . "  else                                   \n"
-          . "    strm_$operD"."_r  <= strm_$operD"."; \n"
-          . "end                                      \n";
-      }
-        
-      #these lines for instantiating pipelined FU is common
-      #the difference in source operands in case of redux is already handled by
-      #re-assigning oper1 and oper2
-      $strBuf = "$strBuf \n"
-        . "$fu #(DataW) PE$fuCount "
-        . "(clk, rst, , , strm_$operD, strm_$oper1, strm_$oper2);\n\n";
-      
-      $fuCount++;  
-    }#else
-    
-  }#for   
-  
-  #since the last pipeline stages output is actually a port
-  #so remove its wire declaration
-  #$strBuf =~ s/wire \[DataW-1:0\] strm_$operD;//g;
-
-  $genCode =~ s/<pipelineStages>/$strBuf/g;
-  $strBuf = "";
-
-  # -------------------------------------
-  # >>>>>> create start/stop delay lines
-  # -------------------------------------
-
-
-  # create one delay line for (each) start and stop for each pipeline stage
-  for (my $i=0; $i < $fHash{nPipeStages} ; $i++) {
-    $strBuf 
-      = "$strBuf \n"
-      . "// ------ CONTROL delay lines for stage $i ------\n"
-      . "wire start_z" . ($i+1) . ", stop_z" . ($i+1) . ";\n"
-      . "delayline_z1 #(1) DL0$i (clk, start_z".($i+1).", start_z".$i." ); \n"
-      . "delayline_z1 #(1) DL1$i (clk, stop_z".($i+1).", stop_z".$i."  ); \n";
-    $fuCount++;
-  }#for
-  
-  $genCode =~ s/<delayLines>/$strBuf/g;
-  $strBuf = "";
-
-  # --------------------------------
-  # >>>>> Output wires
-  # --------------------------------
-  # the ready signal is picked from delayed start signal from penultimate stage
-  $strBuf = "start_z".($fHash{nPipeStages}-1);
-  $genCode =~ s/<outputReady>/$strBuf/g;
-  $strBuf = "";
-
-  # the done signal is picked from the delayed stop signal from final stage
-  $strBuf = "stop_z".$fHash{nPipeStages};
-  $genCode =~ s/<outputDone>/$strBuf/g;
-  $strBuf = "";
-
+  $str_oreadysAnd .= "  ;";
   # --------------------------------
   # >>>>> Write to file
   # --------------------------------
+  $genCode =~ s/<outputs>/$str_outputs/g;
+  $genCode =~ s/<oreadys>/$str_oreadys/g;
+  $genCode =~ s/<oreadysAnd>/$str_oreadysAnd/g;
+  $genCode =~ s/<ovalids>/$str_ovalids/g;
+  $genCode =~ s/<assign_ovalids>/$str_assign_ovalids/g;
+  $genCode =~ s/<assign_dataouts>/$str_assign_dataouts/g;
+  $genCode =~ s/<shift_data_and_valid>/$str_shift_data_and_valid/g;
+  $genCode =~ s/<dont_shift_data_and_valid>/$str_dont_shift_data_and_valid/g;
   $genCode =~ s/\r//g; #to remove the ^M  
   print $fhGen $genCode;
-  
-  print "TyBEC: Generated module $modName for TyTra-IR function $fHash{funcName}\n";
-  
-  return;
+#  
+  print "TyBEC: Generated module $modName\n";  
 } 
 
 # ============================================================================
-# GENERATE Compute-Pipe  [CG parent pipe (of pipes) ]
+# GENERATE AUTOINDEX
 # ============================================================================
 
-sub genComputePipe_CG {
+sub genAutoIndex {
   # --------------------------------
   # >>> ARGS
   # --------------------------------
-  my $fhGen       = $_[0];  #file handler for output file
-  my $modName     = $_[1];  #module_name
-  my $designName  = $_[2];  #design name
-  my %fHash       = %{$_[3]};  #the hash from parsed code for this CG pipe function
+  my  ($fhGen             #file handler for output file
+      ,$modName           #module_name
+      ,$designName
+      ,$outputRTLDir
+      ,$hashref
+      ,$vect
+      ) = @_; 
+      
+  my %hash        = %{$hashref};  #the hash from parsed code for this pipe function
+  my $synthunit   = 'autoindex';
+  my $synthDtype  = $hash{synthDtype};
+  my $datat       = $synthDtype; #complete type (e.g i32)    
+  (my $dataw = $datat)     =~ s/\D*//g; #width in bits
+  (my $dataBase = $datat)  =~ s/\d*//g; #base type (ui, i, or float)
+  my $startat     = $hash{start};
+  my $wrapat      = $hash{end};
 
   # --------------------------------
   # >>>>> Locals
   # --------------------------------
   my $timeStamp   = localtime(time);
-  my $strBuf = ""; # temp string buffer used in code generation 
-
-  # --------------------------------
-  # >>>> Load template file
-  # --------------------------------
-  my $templateFileName = "$TyBECROOTDIR/hdlGenTemplates/ComputePipe_CG.template.v"; 
+  
+  #sring buffers for code-gen  
+#  
+  # ---------------------------------------
+  # >>>> Load template file, read contents
+  # ---------------------------------------
+  my $templateFileName;
+  $templateFileName = "$TyBECROOTDIR/hdlGenTemplates/template.autocounter.v";
+  
   open (my $fhTemplate, '<', $templateFileName)
     or die "Could not open file '$templateFileName' $!"; 
 
-  # --------------------------------
-  # >>>> Read template contents into string
-  # --------------------------------
   my $genCode = read_file ($fhTemplate);
+  close $fhTemplate;
 
+  # --------------------------------
+  # >>>>> Update header and module name 
+  # --------------------------------
+  $genCode =~ s/<module_name>/$modName/g;
+  $genCode =~ s/<design_name>/$designName/g;
+  $genCode =~ s/<gen_ver>/$main::tybecRelease/g;
+  $genCode =~ s/<timeStamp>/$timeStamp/g;
+
+      
+  
+  # ------------------------------------
+  # >>>>> Update tags and write to file
+  # ------------------------------------
+  $genCode =~ s/<counterw>/$dataw/g;
+  $genCode =~ s/<startat>/$startat/g;
+  $genCode =~ s/<wrapat>/$wrapat/g;
+  #$genCode =~ s/<outputs>/$str_outputs/g;
+  $genCode =~ s/\r//g; #to remove the ^M  
+  print $fhGen $genCode;
+  print "TyBEC: Generated module $modName\n";  
+} 
+
+# ============================================================================
+# GENERATE map node -- leaf 
+# ============================================================================
+#while I have kept the ability to generate vectorized leaf nodes, 
+#that is not currently used as the parent/hierarchical nodes
+#instantiate multiple instances of their leaf nodes if needed
+#for vectorization, so lead nodes are always scalar modules
+#TODO: currently I am using separate source templates for each vector size
+# no need for this, I should genreate from a common template
+
+sub genMapNode_leaf {
+  # --------------------------------
+  # >>> ARGS
+  # --------------------------------
+  my  ($fhGen             #file handler for output file
+      ,$modName           #module_name
+      ,$designName
+      ,$outputRTLDir
+      ,$hashref
+      ,$vect
+      ) = @_; 
+      
+  my %hash        = %{$hashref};  #the hash from parsed code for this pipe function
+  my $synthunit   = $hash{synthunit};
+  my $synthDtype  = $hash{synthDtype};
+  my $datat       = $synthDtype; #complete type (e.g i32)    
+  (my $dataw = $datat)     =~ s/\D*//g; #width in bits
+  (my $dataBase = $datat)  =~ s/\d*//g; #base type (ui, i, or float)
+
+  #need latency to generate correct ovalid signal
+  #all leaf nodes (must) have deterministic, fixed latency
+  my $lat = $hash{performance}{lat};
+
+  #How many input operands? Code-gen depends on it
+  my $nInOps = 2; #default
+  $nInOps = 1 if ($synthunit eq 'load'); 
+  $nInOps = 3 if ($synthunit eq 'select') ;
+    
+  # --------------------------------
+  # >>>>> Locals
+  # --------------------------------
+  my $timeStamp   = localtime(time);
+  my $strBuf = ""; # temp string buffer used in code generation 
+  my $operator = "";
+
+  #by default, first input port exists (does not exist for CONSTANT)
+  my $firstOpInputPort = "  , input      [STREAMW-1:0]  in1_s0"; 
+
+  
+  #by default, second input port exists (does not exist for LOAD, or CONSTANT)
+  my $secondOpInputPort = "  , input      [STREAMW-1:0]  in2_s0"; 
+  
+  #by default 2 input operands; SELECT requires 3rd
+  my $thirdOpInputPort = ""; 
+  
+  #string for creating input valids, input readys, and output ready ports
+  my $str_inputIvalids = "";
+  my $str_inputOreadys = "";
+  my $str_inputIreadys = "";
+  
+  #string for ANDING input ivalids and oreadys, and fanning out ireadys
+  my $str_inputIvalidsAnded = "";
+  my $str_inputOreadysAnded = "";
+  my $str_ireadysFanout     = "";
+  
+  #assigning contant operands their value
+  my $str_assignConstants = "";
+  
+  #fifo buffer instantiated in case this is a fifobuf module
+  my $str_instFifoBuff = '';
+
+  #ovalid logic, diff for integer vs float
+  my $str_ovalidLogic = '';
+  
+  
+  #in case of FP units, 2 MSBs are fixed as per requirements of flopoco
+  my $str_fpcEF = "";
+  # ---------------------------------------
+  # >>>> Load template file, read contents
+  # ---------------------------------------
+  my $templateFileName;
+  #pick up the template file for the appropriate vectorization
+  if($vect==1) {$templateFileName = "$TyBECROOTDIR/hdlGenTemplates/template.mapnode_leaf.v";}
+  else         {$templateFileName = "$TyBECROOTDIR/hdlGenTemplates/template.mapnode_leaf_vect$vect.v";}
+  
+  open (my $fhTemplate, '<', $templateFileName)
+    or die "Could not open file '$templateFileName' $!"; 
+
+  my $genCode = read_file ($fhTemplate);
   close $fhTemplate;
 
   # --------------------------------
@@ -857,1392 +534,1271 @@ sub genComputePipe_CG {
   $genCode =~ s/<timeStamp>/$timeStamp/g;
 
   # -------------------------------------------------------
-  # >>>>> Generate parameter list and default values
+  # >>>>> DATAW/STREAMW parameters
   # -------------------------------------------------------
-  foreach my $key (keys %{$fHash{args}}) {   
-    (my $name = $fHash{args}{$key}{name}) =~ s/[\@\%]+//g;
-    
-    # input streams
-    if($fHash{args}{$key}{dir} eq 'input') {
-      $strBuf = "$strBuf"
-              . "  , parameter STRM_$name"."_W            = 32\n"
-    }#if
-    
-    # output streams; treated same for now, but may need differentiation      
-    else {
-      $strBuf = "$strBuf"
-              . "  , parameter STRM_$name"."_W            = 32\n"
-    }#else 
-  }#foreach
-  $genCode =~ s/<params>/$strBuf/g;
-  $strBuf = "";
+  my $streamw;
+  if($dataBase eq 'float')  {$streamw=$dataw+2;}
+  else                      {$streamw=$dataw;}
 
-  # -------------------------------------------------
-  # >>>>> create inputs and output STREAMING ports
-  # -------------------------------------------------
-  foreach my $key (keys %{$fHash{args}}) {
-    (my $name = $fHash{args}{$key}{name}) =~ s/[\@\%]+//g;   
-
-    #create input streaming ports
-    if($fHash{args}{$key}{dir} eq 'input') {
-      $strBuf = "$strBuf \n"
-              . "  , "
-              . "input\t[STRM_$name"."_W-1:0] strm_"
-              . $name;
-      #check if this input stream has any associated offSets, which case
-      #they need to be connected to the child as well
-      if (exists $fHash{args}{$key}{offSets}) {
-        foreach my $keyOffset (keys %{$fHash{args}{$key}{offSets}}) {
-          $strBuf = "$strBuf \n"
-                  . "  , "
-                  . "input\t[STRM_$name"."_W-1:0] strm_$keyOffset";  
-        }#foreach
-      }#if
-    }#if
-    #create output streaming ports
-    else {
-      $strBuf = "$strBuf \n"
-              . "  , "
-              . "output\t[STRM_$name"."_W-1:0] strm_"  
-              . $name;
-    }#else 
-  }#foreach
-  $genCode =~ s/<streamingPorts>/$strBuf/g;
-  $strBuf = "";
-
-  # ------------------------------------------------------
-  # >>>>> Instiate child modules, make connection wires
-  # ------------------------------------------------------
-  my $strBuf4wires = ''; 
-    #this separate buffer for generation of code for creating wires
-    #which happens alongside code-gen for inst' modules, but
-    #has to be placed separately in the verilog target
-    
-  # **only for cPipe_PipesA
-  #loop over each (pipe function call) instruction in the CG-pipeline
-  foreach my $instrKey (keys %{ $fHash{instructions} }) {
-        
-    #only allow calls to other functions in this CG-PIPE function
-    if( ($fHash{instructions}{$instrKey}{instrType} ne 'funcCall')
-      &&($fHash{instructions}{$instrKey}{funcType} ne 'pipe')      ){
-      die "TyBEC: **ERROR** In a Coarse-Grained Pipe module, all instructions must only be calls to pipe functions.";}
-
-    my $childFuncName = $fHash{instructions}{$instrKey}{funcName};
-    
-    #begin child instantiation
-    #--------------------------
-    #start the string to instantiate the CORE module
-    $strBuf = "$strBuf"
-      . "\n// ------ Instantiating ComputePipe_$childFuncName ------\n"
-      . "ComputePipe_$childFuncName \n"
-      . "#(. DataW   (DataW) \n";
-
-    #now iterate over all args2child in the function call (which are all presumed to be streams for now)
-    #and generate parameter connections for each stream argument
-    foreach my $argKey  (keys %{$fHash{instructions}{$instrKey}{args2child} }) {      
-      
-      #pick up the name of the child port to connect to
-      (my $childPortName = $fHash{instructions}{$instrKey}{args2child}{$argKey}{nameChildPort}) =~ s/[\@\%]+//g;
-      
-      #pick up the name of the parent wire/stream that connects to the child port
-      # TODO: currently connecting all parameters to "DataW" paramter, rather than custom for each port... 
-      (my $parentPortName = $fHash{instructions}{$instrKey}{args2child}{$argKey}{name}) =~ s/[\@\%]+//g;
-      # input streams
-      if($fHash{instructions}{$instrKey}{args2child}{$argKey}{dir} eq 'input') {
-        $strBuf = "$strBuf"
-          ."  , .STRM_$childPortName"."_W (DataW)\n"}   #   (STRM_$parentPortName"."_W          )\n" }#if
-      # output streams; treated same for now, but may need differentiation      
-      else {
-        $strBuf = "$strBuf"
-          ."  , .STRM_$childPortName"."_W (DataW)\n"}   #  (STRM_$parentPortName"."_W          )\n" }#else 
-    }#foreach argKey
+  $genCode =~ s/<dataw>/$dataw/g;
+  $genCode =~ s/<streamw>/$streamw/g;
   
-    #now that parameters are connected, continue module declaration
-    $strBuf = "$strBuf"
-        . ")\n"
-        . "  ComputePipe_$childFuncName"."\n"     #TODO: will need a sequence number if Symm pipes allowed
-        . "  ( .clk   (clk    )\n"                     
-        . "  , .rst   (rst    )\n";
-        
-        
-    # control cconnections between peer kernels
-    #-------------------------------------------
-    
-    # check instrSeq, to find the preceeding and succeeding kernels
-    my $instrSeq = $fHash{instructions}{$instrKey}{instrSequence};
-    
-    #loop over all kernels (again) and if preceeding or succeeding to current
-    # , create control wires and make connections accordingly
-    foreach my $instrKeyNested (keys %{ $fHash{instructions} }) {
-      my $nestedChildFuncName = $fHash{instructions}{$instrKeyNested}{funcName};
-      
-      #check that kernel being checked is not the current one; if so, nothing to do
-      if($instrKey eq $instrKeyNested) 
-        {}
-      
-      #LEFT neighbour found; connect START and STOP
-      elsif( $fHash{instructions}{$instrKeyNested}{instrSequence} == ($instrSeq-1) ) {
-        #for left neighbour, connect lefts (nesteds) ready and done to rights start and stop
-        
-        #create wires in the wiring buffer
-        $strBuf4wires = "$strBuf4wires\n"
-          . "wire ready_between;\n"
-          . "wire done_between;\n";
-        
-        #make connections in the main buffer
-        $strBuf = "$strBuf"
-          ."  , .start  (ready_between)\n" 
-          ."  , .stop   (done_between)\n";
-      }
-      
-      #RIGHT neighbour found; connect READY and DONE
-      elsif( $fHash{instructions}{$instrKeyNested}{instrSequence} == ($instrSeq+1) ) {
-        #for right neighbour, connect lefts ready and done to rights (nested) start and stop
-        
-        #create wires in the wiring buffer
-          # Taken this out as checking only left neighbours for all kernels is good enough...
-          # This becomes redundant!
-          #$strBuf4wires = "$strBuf4wires\n"
-            #. "wire ready_$childFuncName"."_to_start_$nestedChildFuncName".";\n"
-            #. "wire done_$childFuncName"."_to_stop_$nestedChildFuncName".";\n";
-        
-        #make connections to READY and DONE in the main buffer
-        $strBuf = "$strBuf"
-          ."  , .ready  (ready_between)\n" 
-          ."  , .done   (done_between)\n";
-      }
-      #else, this is not a neighbour
-      else
-        {}
-    }#foreach instrKeyNested
-    
-    # control connections parent-child kernels
-    #-------------------------------------------
-    #now check if this instruction is first or last in the sequence, in which case connect control
-    #signals directly to parent ports
-    #if left-most, START and STOP connect to parent ports
-    #if right-most, READY and DONE connect to parent ports
-    if($instrSeq == 0) { #left-most kernel
-        $strBuf = "$strBuf"
-          ."  , .start  (start) \n"
-          ."  , .stop   (stop ) \n";
-    }
-    #
-    elsif($instrSeq == ($fHash{nPipeStages}-1) ) { #right-most kernel
-        $strBuf = "$strBuf"
-          ."  , .ready  (ready) \n"
-          ."  , .done   (done ) \n";
-    }
-    
-    
-    #data connections between peer kernels
-    #--------------------------------------
-    # loop over all kernels (again) and if preceeding or succeeding to current
-    # create control wires
-    foreach my $instrKeyNested (keys %{ $fHash{instructions} }) {
-      (my $nestedChildFuncName = $fHash{instructions}{$instrKeyNested}{funcName}) =~ s/[\@\%]+//g;
-      
-      # Creating Connection wires -----------------
-      #check that kernel being checked is not the current one; if so, nothing to do
-      if($instrKey eq $instrKeyNested) 
-        {}
-      #LEFT neighbour found; make data connection wires
-      elsif( $fHash{instructions}{$instrKeyNested}{instrSequence} == ($instrSeq-1) ) {
-      #else {
-        #now iterate over all args2child in the function call 
-        #and check if the any of variables connected to its argument-ports is
-        #common with that of another (the nested) kernel call, in which case, make
-        #data connections
-        #NOTE: TODO: This means we are currentl limited to a simple config
-        #where connections cannot "jump" any kernel in the pipeline
-        #the workaround is to pass every signal through the kernel, which
-        #is as well as that will automatically create pipeline buffers inside it
-        
-        foreach my $argKey  (keys %{$fHash{instructions}{$instrKey}{args2child} }) {   
-          #reduce clutter; this is the name of the connecting variable to the argument of the first kernel
-          (my $argConnName = $fHash{instructions}{$instrKey}{args2child}{$argKey}{name}) =~ s/[\@\%]+//g;
-          
-          #now loop over all arguments of the second kernel to see if there is a match for connection
-          foreach my $argKeyNested (keys %{$fHash{instructions}{$instrKeyNested}{args2child} }) {      
-            #if the name of connecting variables in argument list of two kernels is same
-            if (  $fHash{instructions}{$instrKey}{args2child}{$argKey}{name}
-               eq $fHash{instructions}{$instrKeyNested}{args2child}{$argKeyNested}{name} ) {
-              #create wires in the wiring buffer
-              #TODO assuming all connecting wires are DataW!
-              $strBuf4wires = "$strBuf4wires\n"
-                . "wire [DataW-1:0] $argConnName" . "_between;"
-                
-            }#if
-          }#foreach my $argKeyNested
-        }#foreach argKey
-      }#elsif
-      
-      # Making the connections --------------------
-      #check that kernel being checked is not the current one; if so, nothing to do
-      if($instrKey eq $instrKeyNested) 
-        {}
-      else {
-        #now iterate over all args2child in the function call 
-        #and check if the any of variables connected to its argument-ports is
-        #common with that of another (the nested) kernel call, in which case, make
-        #data connections
-        #NOTE: TODO: This means we are currentl limited to a simple config
-        #where connections cannot "jump" any kernel in the pipeline
-        #the workaround is to pass every signal through the kernel, which
-        #is as well as that will automatically create pipeline buffers inside it
-        
-        foreach my $argKey  (keys %{$fHash{instructions}{$instrKey}{args2child} }) {   
-          #reduce clutter; this is the name of the connecting variable to the argument of the first kernel
-          (my $argConnName = $fHash{instructions}{$instrKey}{args2child}{$argKey}{name}) =~ s/[\@\%]+//g;
-          #and this is the name of this argument inside the kernel definition
-          (my $argNameInsideKernel = $fHash{instructions}{$instrKey}{args2child}{$argKey}{nameChildPort}) =~ s/[\@\%]+//g;
-          
-          #now loop over all arguments of the second kernel to see if there is a match for connection
-          foreach my $argKeyNested (keys %{$fHash{instructions}{$instrKeyNested}{args2child} }) {      
-            #if the name of connecting variables in argument list of two kernels is same
-            if (  $fHash{instructions}{$instrKey}{args2child}{$argKey}{name}
-               eq $fHash{instructions}{$instrKeyNested}{args2child}{$argKeyNested}{name} ) {
-              #make the connnections
-              $strBuf = "$strBuf"
-                ."  , ." . "strm_" . $argNameInsideKernel 
-                ."("
-                . $argConnName. "_between)\n" ;
-            }#if
-          }#foreach my $argKeyNested
-        }#foreach argKey
-      }#else      
-    }#foreach my $instrKeyNested (keys %{ $fHash{instructions} }) {
-    
-    #data connections between parent-child kernels
-    #---------------------------------------------
-    #loop over all arguments (ports) of this parent kernel, and compare their names with
-    #all the args (ports) of child kernels. Match indicates connection... make it!
-    
-    # the loop over all argument of parent kernel
-    foreach my $argKey  (keys %{$fHash{args}}) {   
-      #now the loop over all the arguments of the child kernel
-      foreach my $argKeyNested  (keys %{$fHash{instructions}{$instrKey}{args2child} }) {   
-        #see if names match  
-        if (    $fHash{args}{$argKey}{name} 
-            eq  $fHash{instructions}{$instrKey}{args2child}{$argKeyNested}{name} ) {
-          #reduce clutter
-          (my $argNameParent = $fHash{args}{$argKey}{name}) =~ s/[\@\%]+//g;
-          (my $argNameInsideKernel = $fHash{instructions}{$instrKey}{args2child}{$argKeyNested}{nameChildPort}) =~ s/[\@\%]+//g;
-          #make parent-child port-port data connection
-          $strBuf = "$strBuf"
-            ."  , ." . "strm_" . $argNameInsideKernel 
-            ."("
-            . "strm_" . $argNameParent
-            .")\n" ;
-        }#if  
-      }#foreach my $argKeyNested
-    }#foreach my $argKey
-
-    #close module instantiation
-    $strBuf = "$strBuf".");\n" ;
-  }#foreach my $instrKey 
-
-  $genCode =~ s/<childPipes>/$strBuf/g;
-  $genCode =~ s/<connectingWires>/$strBuf4wires/g;
-  $strBuf = "";
+  #the output stream width is same as STREAMW by default
+  my $oStrWidth = "[STREAMW-1:0]";
+  #(its 1-bit for compare operation)
+  $oStrWidth = "             " if ($synthunit eq 'compare');
   
-  # --------------------------------
-  # >>>>> Write to file
-  # --------------------------------
-  $genCode =~ s/\r//g; #to remove the ^M  
-  print $fhGen $genCode;
-  
-  print "TyBEC: Generated module $modName for TyTra-IR function $fHash{funcName}\n";
-  
-  return;
-}
-
-# ============================================================================
-# GENERATE Core --> Pipe ()
-# ============================================================================
-# Generate the wrapper Core around a CoreCompute of type pipe.
-
-
-sub genCorePipe {
-  # --------------------------------
-  # >>> ARGS
-  # --------------------------------
-  my $fhGen       = $_[0];  #file handler for output file
-  my $modName     = $_[1];  #module_name
-  my $designName  = $_[2];  #design name
-  my $targetDir   = $_[3];  #target dir needed because this generator can spawn its own generate calls
-  my %fHash       = %{$_[4]};  #the hash from parsed code for the pipe function function
-
-
-  my $thisFuncName = $fHash{funcName}; #reduce clutter
-  
-  # --------------------------------
-  # >>>>> Locals
-  # --------------------------------
-  my $timeStamp   = localtime(time);
-  my $strBuf = ""; # temp string buffer used in code generation 
-
-  # --------------------------------
-  # >>>> Load template file
-  # --------------------------------
-  my $templateFileName = "$TyBECROOTDIR/hdlGenTemplates/CorePipe.template.v"; 
-  open (my $fhTemplate, '<', $templateFileName)
-    or die "Could not open file '$templateFileName' $!";     
-  
-  # --------------------------------
-  # >>>> Read template contents into string
-  # --------------------------------
-  my $genCode = read_file ($fhTemplate);
-
-  close $fhTemplate;
-
-  # --------------------------------
-  # >>>>> Update header 
-  # --------------------------------
-  $genCode =~ s/<module_name>/$modName/g;
-  $genCode =~ s/<design_name>/$designName/g;
-  $genCode =~ s/<gen_ver>/$main::tybecRelease/g;
-  $genCode =~ s/<timeStamp>/$timeStamp/g;
-
-  # -------------------------------------------------------
-  # >>>>> Generate parameter list and default values
-  # -------------------------------------------------------
-  foreach my $key (keys %{$fHash{args}}) {   
-    (my $name = $fHash{args}{$key}{name}) =~ s/[\@\%]+//g; 
-    
-    # input streams
-    if($fHash{args}{$key}{dir} eq 'input') {
-      $strBuf = "$strBuf\n"
-        . "  ,  parameter STRM_$name"."_W            = 32\n"
-        . "  ,  parameter NDims_$name"."             = 1 \n"
-        . "  ,  parameter Dim1Length_$name"."        = 12\n"
-        . "  ,  parameter LinearLength_$name"."      = 12\n"
-        . "  ,  parameter IndexStartDim1_$name"."    = 0 \n"
-        . "  ,  parameter IndexEndDim1_$name"."      = 11\n"
-        . "  ,  parameter IndexStartLinear_$name"."  = 0 \n"
-        . "  ,  parameter IndexEndLinear_$name"."    = 11\n"           
-        . "  ,  parameter MEM_DATA_W_$name"."        = 32\n"    
-        . "  ,  parameter MEM_ADDR_W_$name"."        = 10\n"  
-        . "  ,  parameter MEM_STARTADDR_$name"."     = 0 \n"        
-    }#if
-    
-    # output streams; treated same for now, but may need differentiation      
-    else {
-      $strBuf = "$strBuf\n"
-        . "  ,  parameter STRM_$name"."_W            = 32\n"
-        . "  ,  parameter NDims_$name"."             = 1 \n"
-        . "  ,  parameter Dim1Length_$name"."        = 12\n"
-        . "  ,  parameter LinearLength_$name"."      = 12\n"
-        . "  ,  parameter IndexStartDim1_$name"."    = 0 \n"
-        . "  ,  parameter IndexEndDim1_$name"."      = 11\n"
-        . "  ,  parameter IndexStartLinear_$name"."  = 0 \n"
-        . "  ,  parameter IndexEndLinear_$name"."    = 11\n"           
-        . "  ,  parameter MEM_DATA_W_$name"."        = 32\n"    
-        . "  ,  parameter MEM_ADDR_W_$name"."        = 10\n"  
-        . "  ,  parameter MEM_STARTADDR_$name"."     = 0 \n"        
-    }#else 
-  }#foreach
-  $genCode =~ s/<params>/$strBuf/g;
-  $strBuf = "";
-  
-  # -------------------------------------------------------
-  # >>>>> create memory ports for input and output streams ONLY
-  # -------------------------------------------------------
-
-  foreach my $key (keys %{$fHash{args}}) {
-    #check to confirm stream is not offset stream, in which case bypass
-    #as offset streams are deal differently
-    if($fHash{args}{$key}{isOffsetStream} != 1) {
-      (my $name = $fHash{args}{$key}{name}) =~ s/[\@\%]+//g; 
-      
-      # comment line
-      $strBuf = "$strBuf \n"."// ------------ LMEM ports for $name ----------";
-      
-      #create data_in and read_en for input streaming ports
-      if($fHash{args}{$key}{dir} eq 'input') {
-        $strBuf = "$strBuf \n"
-                . "  , "
-                . "input\t[MEM_DATA_W_$name"."-1:0]\t"  
-                . "LMEM_$name"."_datain";
-        $strBuf = "$strBuf \n"
-                . "  , "
-                . "output\t"  
-                . "LMEM_$name"."_re";
-      }#if
-      
-      #create data_out and wr_en for output streaming ports
-      else {
-        $strBuf = "$strBuf \n"
-                . "  , "
-                . "output\t[MEM_DATA_W_$name"."-1:0]\t"  
-                . "LMEM_$name"."_dataout";
-        $strBuf = "$strBuf \n"
-                . "  , "
-                . "output\t"  
-                . "LMEM_$name"."_we";
-      }#else 
-      
-      #create address for all streams
-      $strBuf = "$strBuf \n"
-              . "  , "
-              #. "output\t[MEM_ADDR_W_$name"."-1:0]\t"  taking out -1 as it seems to cause overflow error (signed comparison?)
-              . "output\t[MEM_ADDR_W_$name".":0]\t"  
-              . "LMEM_$name"."_addr";
-    }#if
-  }#foreach
-  $genCode =~ s/<lmem_ports>/$strBuf/g;
-  $strBuf = "";
-
-  
-  
-  # -------------------------------------------------------
-  # >>>>> create wires for stream connections from/to child
-  # -------------------------------------------------------
-  # this is required for all streams, whether port streams or
-  # internal offset streams
-  foreach my $key (keys %{$fHash{args}}) {   
-    (my $name = $fHash{args}{$key}{name}) =~ s/[\@\%]+//g;
-    
-    # input streams
-    if($fHash{args}{$key}{dir} eq 'input') {
-      $strBuf = "$strBuf \n"
-              . "wire [DataW-1:0]\t"."strm_$name".";";
-    }#if
-    
-    # output streams; treated same for now, but may need differentiation      
-    else {
-      $strBuf = "$strBuf \n"
-              . "wire\t[DataW-1:0]\t"."strm_$name".";";
-    }#else 
-  }#foreach
-  $genCode =~ s/<wires_for_streams>/$strBuf/g;
-  $strBuf = "";
-
-  # -------------------------------------------------------
-  # >>>>> Create index counters for each stream
-  # -------------------------------------------------------
-  foreach my $key (keys %{$fHash{args}}) {   
-    #check to confirm stream is not offset stream, in which case bypass
-    #as offset streams are deal differently
-    if($fHash{args}{$key}{isOffsetStream} != 1) {
-      (my $name = $fHash{args}{$key}{name}) =~ s/[\@\%]+//g; 
-  
-      # comment line
-      $strBuf = "$strBuf\n"."// ------------ Index counter(s) for stream $name ----------";
-      
-      # index counters for input streams
-      if($fHash{args}{$key}{dir} eq 'input') {
-        $strBuf = "$strBuf \n"
-          #. "reg   [MEM_ADDR_W_$name"."-1:0]   icount_$name".";\n" #taking out -1; seems to cause error?
-          . "reg   [MEM_ADDR_W_$name".":0]   icount_$name".";\n"
-          . "always @(posedge clk)\n"
-          . "  if (rst)\n"
-          . "    icount_$name"." <= 0;\n"
-          . "  else if (start)//<-- input streams start counting on start\n"
-          . "    icount_$name"." <= IndexStartLinear_$name".";\n"
-          . "  else\n"
-          . "    icount_$name"." <= icount_$name"." + 1;\n"
-      }#if
-      
-      # index counters for output streams
-      else {
-        $strBuf = "$strBuf \n"
-          #. "reg   [MEM_ADDR_W_$name"."-1:0]   icount_$name".";\n" #taking out -1; seems to cause error?
-          . "reg   [MEM_ADDR_W_$name".":0]   icount_$name".";\n"
-          . "always @(posedge clk)\n" 
-          . "  if (rst)\n"
-          . "    icount_$name"." <= 0;\n"
-          . "  else if (ready) //<-- output streams start counting on ready\n"
-          . "    icount_$name"." <= IndexStartLinear_$name".";\n"
-          . "  else if (cts)\n"
-          . "    icount_$name"." <= icount_$name"." + 1;\n"
-          . "  else\n" 
-          . "    icount_$name"." <= icount_$name".";\n"
-      }#else 
-    }#if
-  }#foreach
-  $genCode =~ s/<index_counters>/$strBuf/g;
-  $strBuf = "";
-
-
-  # --------------------------------
-  # >>>>> Create STOP 
-  # --------------------------------
-  # STOP is created on the basis of one of the input streams 
-  # Iterate through all ports, and on encountering the first input 
-  # use it to generate signal, and then break...
-  # [TODO: SHOULD have been set as SIGNAL in the TIR, but that messes up the
-  # modularity of code generation, as a PIPE function should be translatable
-  # to HDL in a modular fashion, without having to refer to a stream object?]
-  #
-  foreach my $key (keys %{$fHash{args}}) {   
-    (my $name = $fHash{args}{$key}{name}) =~ s/[\@\%]+//g;
-    #check if arg is input, and NOT an internal streamOffset
-    if( ($fHash{args}{$key}{dir} eq 'input') && ($fHash{args}{$key}{isOffsetStream} != 1) ) {
-      $strBuf = "assign stop = (icount_$name"." == IndexEndLinear_$name".");";
-      last; #break when you find the first input
-    }#if
-  }#foreach 
-  $genCode =~ s/<interal_stop_signal>/$strBuf/g;
-  $strBuf = "";
-
-  # -------------------------------------------------------
-  # >>>>> create FSMs for controlling streams
-  # -------------------------------------------------------
-  foreach my $key (keys %{$fHash{args}}) {   
-    #check to confirm stream is not offset stream, in which case bypass
-    #as offset streams are deal differently
-    if($fHash{args}{$key}{isOffsetStream} != 1) {
-      (my $name = $fHash{args}{$key}{name}) =~ s/[\@\%]+//g;
-      
-      # comment line
-      $strBuf = "$strBuf\n"."// ---------------- FSM for stream $name --------------";
-      
-      # input streams
-      if($fHash{args}{$key}{dir} eq 'input') {
-        $strBuf = "$strBuf \n"
-          ."// State machine for reading from memory                  \n"
-          ."localparam  S_init_$name"." = 0,\n"
-          ."            S_read_$name"." = 1,\n"
-          ."            S_done_$name"." = 2;\n"
-          ."\n"
-          ."reg  [smreg_W-1:0]  cstate_$name".";\n"
-          ."reg  [smreg_W-1:0]  nstate_$name".";  \n"
-          ."\n"
-          ."always @(*)\n"
-          ."  case(cstate_$name".")\n"
-          ."    S_init_$name".": if(start) nstate_$name"." = S_read_$name".";\n"
-          ."              else      nstate_$name"." = cstate_$name".";\n"
-          ."    S_read_$name".": if(stop)  nstate_$name"." = S_done_$name".";\n"
-          ."              else      nstate_$name"." = cstate_$name".";\n"
-          ."    S_done_$name".": nstate_$name"." = S_init_$name".";\n"
-          ."  endcase\n"
-          ."                                                          \n"
-          ."always @(posedge clk)                                     \n"
-          ."  if(rst)                                                 \n"
-          ."    cstate_$name"." <= S_init_$name".";\n"
-          ."  else                                                    \n"
-          ."    cstate_$name"." <= nstate_$name".";\n"
-          ."                                                          \n"
-          ."// Setting signals to memory                              \n"
-          ."assign LMEM_$name"."_re    = (cstate_$name"."==S_read_$name".") ? 1'b1 : 1'b0; \n"
-          ."assign LMEM_$name"."_addr  = MEM_STARTADDR_$name"." + icount_$name".";\n"
-          ."                                                          \n"
-          ."// registering data read from memory                      \n"
-          ."assign strm_$name"." = LMEM_$name"."_datain;                          \n"
-      }#if
-      
-      # output streams; 
-      else {
-        $strBuf = "$strBuf \n"
-          ."// State machine for writing to memory\n"
-          ."localparam  Sw_init_$name"."  = 0,\n"
-          ."            Sw_write_$name"." = 1,\n"
-          ."            Sw_done_$name"."  = 2;\n"
-          ."\n"
-          ."reg  [smreg_W-1:0]  cstate_$name".";\n"
-          ."reg  [smreg_W-1:0]  nstate_$name".";\n"
-          ." \n"
-          ."always @(*) \n"
-          ."  case(cstate_$name".") \n"
-          ."    Sw_init_$name"."  : if(ready) nstate_$name"." = Sw_write_$name".";\n"
-          ."                else      nstate_$name"." = cstate_$name".";\n"
-          ."    Sw_write_$name"." : if(done)  nstate_$name"." = Sw_done_$name".";\n"
-          ."                else      nstate_$name"." = cstate_$name".";\n"
-          ."    Sw_done_$name"."  : nstate_$name"." = Sw_init_$name"."; \n"
-          ."  endcase\n"
-          ."\n"
-          ."always @(posedge clk) \n"
-          ."  if(rst) \n"
-          ."    cstate_$name"."  <= Sw_init_$name".";\n"
-          ."  else \n"
-          ."    cstate_$name"." <= nstate_$name".";\n"
-          ."\n"
-          ."// Setting signals to memory  \n"
-          ."assign LMEM_$name"."_we      = (cstate_$name"."==Sw_write_$name".") ? 1'b1 : 1'b0; \n"
-          ."assign LMEM_$name"."_addr    = MEM_STARTADDR_$name"." + icount_$name"."; \n"
-          ."assign LMEM_$name"."_dataout = strm_$name"."; \n"
-      }#else 
-    }#if
-  }#foreach
-  $genCode =~ s/<stream_control_fsms>/$strBuf/g;
-  $strBuf = "";
-
-  # ------------------------------------------
-  # >>>>> now deal with offset streams <<<<
-  # ------------------------------------------
-  
-  # >>>>>>> create offset modules for all ARGS that 
-  # are offsets 
-  # --------------------------------------------------
-  
-  #loop through all the ARGS, and see if offset streams
-  #need to be generated for them
-  foreach my $key (keys %{$fHash{args}} ) {
-    my @posOffsets;
-    my @negOffsets;
-    my $maxPos;
-    my $maxNeg;
-    
-    #check if this ARG has any offsets
-    if(exists $fHash{args}{$key}{offSets}) {
-      #if so, loop through all offsets, and compile parameters for generation of the
-      #single offset module that generates all those offsets
-      foreach my $key2 (keys %{$fHash{args}{$key}{offSets}} ) {
-          #positive offset 
-          if($fHash{args}{$key}{offSets}{$key2}{offsetDir} eq '+') {
-            push @posOffsets, $fHash{args}{$key}{offSets}{$key2}{offsetDist};
-          }#if
-          #negative offset 
-          else{
-            push @negOffsets, $fHash{args}{$key}{offSets}{$key2}{offsetDist};
-          }#else
-      }#foreach offset stream of port
-      
-      $maxPos = max(@posOffsets);
-      $maxNeg = max(@negOffsets);
-            
-      #now generate the offset module
-      (my $name = $fHash{args}{$key}{name}) =~ s/[\@\%]+//g;
-      my $hdlFileName = "$targetDir/offsetStream_$name".".v";
-        open(my $hdlfh, '>', $hdlFileName)
-          or die "Could not open file '$hdlFileName' $!";   
-        
-        # >>>> ARGS to genOffsetStream()
-        #   file handler for output file
-        #   module_name    
-        #   design name    
-        #   name of port for which offsetStream is needed    
-        #   maximum positive offset required
-        #   maximum negative offset required
-        #   array of required positive offsets  
-        #   array of required negative offsets    
-        HdlCodeGen::genOffsetStream
-          ($hdlfh, "offsetStream_$name", 'justAdd', $key, $maxPos, $maxNeg, \@posOffsets, \@negOffsets );
-    }#if port has offset
-  }#foreach port
-
-  
-  # >>>>>>> Instantiate the offset module inside the
-  # Core and make connections in the Core
-  # --------------------------------------------------
-  #NOTE: our assumption is that corePipe is always either the top function, or
-  #is inside a PAR. Either way, it connects to PORTs in the overall MAIN design
-  #which is why we iterate over the ports, and see which of them have offset streams
-  #and then check them against ports in this module
-  
-  #iterate through all ARGS to this module (the ports)
-  foreach my $keyArg (keys %{$fHash{args}} ) {
-    #see if any offsets created inside the module for this ARG
-    if(exists $fHash{args}{$keyArg}{offSets}) {
-      
-      #reduce clutter; extract name of source ARG (stream)
-      (my $strConn = $fHash{args}{$keyArg}{name}) =~ s/[\@\%]+//g;
-  
-      #iterate through all the offsets for this source argument/stream
-      #and create connection wires
-      foreach my $keyOffset (keys %{$fHash{args}{$keyArg}{offSets}} ) {
-      $keyOffset =~ s/[\@\%]+//g;
-      $strBuf = "$strBuf"
-              . "wire [DataW-1:0]  strm_$keyOffset;\n";
-      }#foreach
-  
-      #start instantiating the offset module for this ARG
-      # comment line
-      $strBuf = "$strBuf"."// ------------ offset Creator for stream argument $strConn ----------\n";
-     
-      #beginning of instantiation
-      $strBuf = "$strBuf"
-              . "offsetStream_$strConn\n"
-              . "  #(.DataW  (STRM_$strConn"."_W) ) \n"
-              . "  OffsetStream_$strConn"."_mod \n"
-              . "    ( .clk    (clk)\n"
-              . "    , .rst    (rst)\n"
-              . "    , .in     (strm_$strConn".")\n";
-      
-      #iterate through all the offsets for this source argument/stream
-      foreach my $keyOffset (keys %{$fHash{args}{$keyArg}{offSets}} ) {
-        #get its parameters
-        (my $offsetName = $keyOffset)=~ s/[\@\%]+//g;
-        my $offsetDir = $fHash{args}{$keyArg}{offSets}{$keyOffset}{offsetDir};
-        my $offsetDist = $fHash{args}{$keyArg}{offSets}{$keyOffset}{offsetDist};
-        
-        #now add the connection line in the instantiation of the offsetStream module
-        #different for + vs - direction
-        if($offsetDir eq '+') {
-          $strBuf = "$strBuf"
-                  . "    , .outP$offsetDist"
-                  . " (strm_$offsetName ) \n";
-        }#if
-        else {
-          $strBuf = "$strBuf"
-                  . "    , .outN$offsetDist"
-                  . " (strm_$offsetName ) \n";
-        }#else
-      }#foreach
-       
-      #end instantiation of offset module    
-      $strBuf = "$strBuf"
-              . ");\n";
-    }#if
-  }#foreach
-
-  $genCode =~ s/<instaniateOffsetStreams>/$strBuf/g;
-  $strBuf = "";  
-
-  # -------------------------------------------------------
-  # >>>>> connect parameters in child instantiation (ComputePipe)
-  # -------------------------------------------------------
-  foreach my $key (keys %{$fHash{args}}) {   
-    (my $name = $fHash{args}{$key}{name}) =~ s/[\@\%]+//g;
-    
-    # input streams
-    if($fHash{args}{$key}{dir} eq 'input') {
-      $strBuf = "$strBuf"
-              . "\t, .STRM_$name"."_W \t(STRM_$name"."_W)\n";
-    }#if
-    # output streams; treated same for now, but may need differentiation      
-    else {
-      $strBuf = "$strBuf"
-              . "\t, .STRM_$name"."_W \t(STRM_$name"."_W)\n";
-    }#else 
-  }#foreach
-  $genCode =~ s/<childCore_parameter_connections>/$strBuf/g;
-  $strBuf = "";
-
-
-  # -------------------------------------------------------
-  # >>>>> connect signals to stream ports of child instantiation (ComputePipe)
-  # -------------------------------------------------------
-  foreach my $key (keys %{$fHash{args}}) {   
-    (my $name = $fHash{args}{$key}{name}) =~ s/[\@\%]+//g; 
-    
-    # input streams
-    if($fHash{args}{$key}{dir} eq 'input') {
-      $strBuf = "$strBuf"
-              . "\t, .strm_$name"."\t(strm_$name".")\n";
-      #check if this input stream has any associated offSets, which case
-      #they need to be connected to the child as well
-      if (exists $fHash{args}{$key}{offSets}) {
-        foreach my $keyOffset (keys %{$fHash{args}{$key}{offSets}}) {
-          $keyOffset =~ s/[\@\%]+//g;
-          $strBuf = "$strBuf"
-                  . "\t, .strm_$keyOffset\t(strm_$keyOffset".")\n";
-        }#foreach
-      }#if
-   }#if
-    
-    # output streams; treated same for now, but may need differentiation      
-    else {
-      $strBuf = "$strBuf"
-              . "\t, .strm_$name"."\t(strm_$name".")\n";
-    }#else 
-  }#foreach
-  $genCode =~ s/<childCore_stream_port_connections>/$strBuf/g;
-  $strBuf = "";
-
-  # -------------------------------------------------------
-  # >>>>> Update name of child module 
-  # (which depends on the relevant function name)
-  # -------------------------------------------------------
-  $genCode =~ s/<funcName>/$fHash{funcName}/g;
-  
-
-
-  # --------------------------------
-  # >>>>> Write to file
-  # --------------------------------
-  $genCode =~ s/\r//g; #to remove the ^M  
-  print $fhGen $genCode;
-
-  print "TyBEC: Generated module $modName for TyTra-IR function $fHash{funcName}\n";
-
-  return;
-
-}#()
-
-
-# ============================================================================
-# GENERATE ComputeUnit
-# ============================================================================
-# 
-
-sub genComputeUnit {
-  #die "Too many arguments for subroutine" unless @_ <= 4;
-  #die "Too few arguments for subroutine" unless @_ >= 4;   
-
-  # --------------------------------
-  # >>> ARGS
-  # --------------------------------
-  my $fhGen       = $_[0];  #file handler for output file
-  my $targetDir   = $_[1];  #target directory needed for importing LMEM files
-  my $modName     = $_[2];  #module_name
-  my $designName  = $_[3];  #design name
-  my $numPipes    = $_[4];  #number of identical pipeline stages (C1)
-  my %CODE       = %{$_[5]};  #the hash for the code
-  
-  my $leafPipe  = $_[6];  #name of leaf level pipeline function
-  my $topPar;
-  
-  if($numPipes > 1) {
-    $topPar = $_[7]; #name of top level par function, if applicable
-  }
-
-  # --------------------------------
-  # >>>>> Locals
-  # --------------------------------
-  my $timeStamp   = localtime(time);
-  my $strBuf = ""; # temp string buffer used in code generation 
-
-  # --------------------------------
-  # >>>> Load template file
-  # --------------------------------
-  my $templateFileName = "$TyBECROOTDIR/hdlGenTemplates/ComputeUnit.template.v"; 
-  open (my $fhTemplate, '<', $templateFileName)
-    or die "Could not open file '$templateFileName' $!";     
-  
-  # --------------------------------
-  # >>>> Read template contents into string
-  # --------------------------------
-  my $genCode = read_file ($fhTemplate);
-  close $fhTemplate;
-
-  # --------------------------------
-  # >>>>> Update header 
-  # --------------------------------
-  $genCode =~ s/<module_name>/$modName/g;
-  $genCode =~ s/<design_name>/$designName/g;
-  $genCode =~ s/<gen_ver>/$main::tybecRelease/g;
-  $genCode =~ s/<timeStamp>/$timeStamp/g;
-
-  # -------------------------------------------------------
-  # >>>>> Generate parameter list and default values for each stream
-  # -------------------------------------------------------
-  # We are at the Compute Unit level, so the stream objects have a 
-  # 1-1 with ports, which have a 1-1 with the arguments (streaming variables only)
-  # of the top level module
-  foreach my $key (keys %{$CODE{launch}{stream_objects}}) {   
-    my $name = $CODE{launch}{stream_objects}{$key}{portConn}; #the relevant port    
-        
-    # input streams
-    if($CODE{launch}{stream_objects}{$key}{dir} eq 'in') {
-      $strBuf = "$strBuf\n"
-        . "  ,  parameter STRM_$name"."_W            = 32\n"
-        . "  ,  parameter NDims_$name"."             = 1 \n"
-        . "  ,  parameter Dim1Length_$name"."        = 12\n"
-        . "  ,  parameter LinearLength_$name"."      = 12\n"
-        . "  ,  parameter IndexStartDim1_$name"."    = 0 \n"
-        . "  ,  parameter IndexEndDim1_$name"."      = 11\n"
-        . "  ,  parameter IndexStartLinear_$name"."  = 0 \n"
-        . "  ,  parameter IndexEndLinear_$name"."    = 11\n"           
-        . "  ,  parameter MEM_DATA_W_$name"."        = 32\n"    
-        . "  ,  parameter MEM_ADDR_W_$name"."        = 10\n"  
-        . "  ,  parameter MEM_STARTADDR_$name"."     = 0 \n"        
-    }#if
-    
-    # output streams; treated same for now, but may need differentiation      
-    else {
-      $strBuf = "$strBuf\n"
-        . "  ,  parameter STRM_$name"."_W            = 32\n"
-        . "  ,  parameter NDims_$name"."             = 1 \n"
-        . "  ,  parameter Dim1Length_$name"."        = 12\n"
-        . "  ,  parameter LinearLength_$name"."      = 12\n"
-        . "  ,  parameter IndexStartDim1_$name"."    = 0 \n"
-        . "  ,  parameter IndexEndDim1_$name"."      = 11\n"
-        . "  ,  parameter IndexStartLinear_$name"."  = 0 \n"
-        . "  ,  parameter IndexEndLinear_$name"."    = 11\n"           
-        . "  ,  parameter MEM_DATA_W_$name"."        = 32\n"    
-        . "  ,  parameter MEM_ADDR_W_$name"."        = 10\n"  
-        . "  ,  parameter MEM_STARTADDR_$name"."     = 0 \n"        
-    }#else 
-  }#foreach
-  $genCode =~ s/<params>/$strBuf/g;
-  $strBuf = "";
-
-  # -------------------------------------------------------
-  # >>>>> create wires for LMEM connections
-  # -------------------------------------------------------
-  foreach my $key (keys %{$CODE{launch}{stream_objects}}) {   
-    my $name = $CODE{launch}{stream_objects}{$key}{portConn}; #the relevant port    
-    
-    # reading data for input streams
-    if($CODE{launch}{stream_objects}{$key}{dir} eq 'in') {
-      $strBuf = "$strBuf"
-              . "wire [MEM_DATA_W_$name"."-1:0]\t"."LMEM_$name"."_rdata;\n";
-      $strBuf = "$strBuf"
-              . "wire [MEM_ADDR_W_$name"."-1:0]\t"."LMEM_$name"."_raddr;\n";
-    }#if
-    
-    # writing data for output streams (data bus and write enable)
-    else {
-      $strBuf = "$strBuf"
-              . "wire [MEM_DATA_W_$name"."-1:0]\t"."LMEM_$name"."_wdata;\n";              
-      $strBuf = "$strBuf"
-              . "wire\tLMEM_$name"."_we;\n";
-      $strBuf = "$strBuf"
-              . "wire [MEM_ADDR_W_$name"."-1:0]\t"."LMEM_$name"."_waddr;\n";
-    }#else 
-    
-  }#foreach
-  $genCode =~ s/<LMEM_connection_wires>/$strBuf/g;
-  $strBuf = "";
-
-  # -------------------------------------------------------
-  # >>>>> Instantiate LMEMs
-  # -------------------------------------------------------
-  foreach my $key (keys %{$CODE{launch}{mem_objects}}) {   
-    # get the name of the memory array variable from the mem_XX format name
-    (my $name=$key)=~s/mem_//; 
-
-    # number of read and write ports
-    my $nrp  = $CODE{launch}{mem_objects}{$key}{readPorts};
-    my $nwp  = $CODE{launch}{mem_objects}{$key}{writePorts};
-    
-    # IMPORT LMEM module from Library
-    copy ("./hdlCoresTybec/memory_cores/LMEM_$nrp"."RP_$nwp"."WP.v", $targetDir);
-        print "TyBEC: Imported module LMEM_$nrp"."RP_$nwp"."WP\n";
-
-    
-    # comment line
-    $strBuf = "$strBuf \n"."// ------------ LMEM  for $name ----------\n";
-    
-    # LMEM instantiation line
-    # create LMEM module name depending on number of read and write ports
-    # will only work if the right module is available in the library
-    # no branching needed here based on direction of stream
-      # the _00 suffix is there # only in the case of multiple  r or w ports, 
-      # because that means multiple streams, and code generator generates separate parameter for each
-      # stream that connects to a memory, so we simply use the parameters of the 0the stream
-      # for the overall memory bus widths. TODO: this is of course redundant as we are assuming
-      # all stream widths are same as the core memory width. However, later on, should perhaps
-      # allow non-uniform streams to be connected to the same memory object? 
-      
-    if (($nrp==1) && ($nwp==1))  {
-      $strBuf = "$strBuf"
-        ."LMEM_$nrp"."RP_$nwp"."WP #(              \n"
-        ."  .DATA_WIDTH (MEM_DATA_W_$name),     \n"
-        ."  .ADDR_WIDTH (MEM_ADDR_W_$name),     \n"
-        ."  .INIT_VALUES()                         \n"
-        .")\n"
-        ."LMEM_$name"."  (                         \n"
-        ."   .clk    (clk  )\n";
-    }#if  
-    else {
-      $strBuf = "$strBuf"
-        ."LMEM_$nrp"."RP_$nwp"."WP #(              \n"
-        ."  .DATA_WIDTH (MEM_DATA_W_$name"."_01),     \n"
-        ."  .ADDR_WIDTH (MEM_ADDR_W_$name"."_01),     \n"
-        ."  .INIT_VALUES()                         \n"
-        .")\n"
-        ."LMEM_$name"."  (                         \n"
-        ."   .clk    (clk  )\n";
-    }#else  
-    
-    # counters for creating port names of LMEM module (which is design agnostic and simply
-    # numbers ports from 0 upwards
-    my $rpcount = 0;
-    my $wpcount = 0;
-    
-    # now some stream dependent port connections
-    # (so loop over streams connected to the memory)
-    
-    foreach my $key2 (keys %{$CODE{launch}{mem_objects}{$key}{streamConn}}) {   
-      
-      #get name of stream object (minus the strobj prefix)
-      (my $name2 = $CODE{launch}{mem_objects}{$key}{streamConn}{$key2}{name}) =~ s/strobj_//; 
-      
-      #for input (to core, i.e., read from memory) streams
-      if($CODE{launch}{mem_objects}{$key}{streamConn}{$key2}{dir} eq 'in') {
-        $strBuf = "$strBuf"
-          ."  ,.raddr_$rpcount"."  (LMEM_$name2"."_raddr)\n"
-          ."  ,.q_$rpcount"."      (LMEM_$name2"."_rdata)\n";
-        $rpcount++;
-      }#if
-      
-      #for output (from core, i.e., write to memory) streams
-      else {
-        $strBuf = "$strBuf"
-          ."  ,.waddr_$wpcount"."  (LMEM_$name2"."_waddr)\n"
-          ."  ,.we_$wpcount"."     (LMEM_$name2"."_we)\n"
-          ."  ,.data_$wpcount"."   (LMEM_$name2"."_wdata)\n";
-        $wpcount++;
-      }#else       
-    }#foreach
-    
-    #put closing braces to instantiation of LMEM
-    $strBuf = "$strBuf".");\n";
-    
-    print "TyBEC: Instantiated module LMEM_$name of type LMEM_$nrp"."RP_$nwp"."WP in $modName\n";   
-  }#foreach
-  $genCode =~ s/<LMEM_instantiations>/$strBuf/g;
-  $strBuf = "";
-  
-  # -------------------------------------------------------
-  # >>>>>>>>>>> Instantiate CHILD CORE(S) <<<<<<<<<<<<<<<<<
-  # -------------------------------------------------------
-
-  
-  # -------------------------------------------------------
-  # >>>>> connect parameters in child instantiation (CorePipe)
-  # -------------------------------------------------------
-  # each instruction in the topPar will be a call to a pipeline module
-  # so a CORE module to be instantiated for each
-  
-  # however, in case of C2 when there is just one pipe, the topPar is actually
-  # the main itself, as there is no thread-parallelism at the top level 
-  if($numPipes == 1) {
-    $topPar = 'main';
-  }
-
-  foreach my $key (keys %{$CODE{$topPar}{instructions}}) {   
-  
-    #remove the "." and any digits to extract pure function name (e.g. f1 from f1.0)
-    (my $fname=$key)=~s/\.\d+//;
-    
-    #the number after . is also required later for code generation
-    (my $seq=$key)=~s/\S+\.//;   
-
-    #start the string to instantiate the CORE module
-    $strBuf = "$strBuf"
-      . "\n// ------ Instantiating CorePipe #$seq for $fname ------\n"
-      . "CorePipe_$fname \n"
-      . "#(. DataW   (DataW) \n";
-
-    #now iterate over all args2child in the function call (which are all presumed to be streams for now)
-    #and generate parameter connections for each stream argument
-    foreach my $key2 (keys %{$CODE{$topPar}{instructions}{$key}{args2child}}) {
-      
-      #pick up the name of the child port (i.e. Core's port) to connect to
-      (my $pname = $CODE{$topPar}{instructions}{$key}{args2child}{$key2}{nameChildPort}) =~ s/[\@\%]+//g;
-      
-      #pick up the name of the parent wire/stream that connects to the child port
-      (my $sname = $CODE{$topPar}{instructions}{$key}{args2child}{$key2}{name}) =~ s/[\@\%]+//g;
-      
-      # input streams
-      if($CODE{$topPar}{instructions}{$key}{args2child}{$key2}{dir} eq 'input') {
-        $strBuf = "$strBuf"
-          ."  , .STRM_$pname"."_W           (STRM_$sname"."_W          )\n"
-          ."  , .NDims_$pname"."            (NDims_$sname"."           )\n"
-          ."  , .Dim1Length_$pname"."       (Dim1Length_$sname"."      )\n"
-          ."  , .LinearLength_$pname"."     (LinearLength_$sname"."    )\n"
-          ."  , .IndexStartDim1_$pname"."   (IndexStartDim1_$sname"."  )\n"
-          ."  , .IndexEndDim1_$pname"."     (IndexEndDim1_$sname"."    )\n"
-          ."  , .IndexStartLinear_$pname"." (IndexStartLinear_$sname".")\n"
-          ."  , .IndexEndLinear_$pname"."   (IndexEndLinear_$sname"."  )\n"           
-          ."  , .MEM_DATA_W_$pname"."       (MEM_DATA_W_$sname"."      )\n"    
-          ."  , .MEM_ADDR_W_$pname"."       (MEM_ADDR_W_$sname"."      )\n"  
-          ."  , .MEM_STARTADDR_$pname"."    (MEM_STARTADDR_$sname"."   )\n"        
-      }#if
-    
-      # output streams; treated same for now, but may need differentiation      
-      else {
-        $strBuf = "$strBuf"
-            ."  , .STRM_$pname"."_W           (STRM_$sname"."_W          )\n"
-            ."  , .NDims_$pname"."            (NDims_$sname"."           )\n"
-            ."  , .Dim1Length_$pname"."       (Dim1Length_$sname"."      )\n"
-            ."  , .LinearLength_$pname"."     (LinearLength_$sname"."    )\n"
-            ."  , .IndexStartDim1_$pname"."   (IndexStartDim1_$sname"."  )\n"
-            ."  , .IndexEndDim1_$pname"."     (IndexEndDim1_$sname"."    )\n"
-            ."  , .IndexStartLinear_$pname"." (IndexStartLinear_$sname".")\n"
-            ."  , .IndexEndLinear_$pname"."   (IndexEndLinear_$sname"."  )\n"           
-            ."  , .MEM_DATA_W_$pname"."       (MEM_DATA_W_$sname"."      )\n"    
-            ."  , .MEM_ADDR_W_$pname"."       (MEM_ADDR_W_$sname"."      )\n"  
-            ."  , .MEM_STARTADDR_$pname"."    (MEM_STARTADDR_$sname"."   )\n"        
-      }#else 
-    }#foreach my $key2 (keys %{$CODE{$topPar}{instructions}{$key}{args2child}} {
-
-  
-    #now that parameters are connected, continue module declaration
-    $strBuf = "$strBuf"
-        . ")\n"
-        . "  core$seq\n" 
-        . "  ( .clk               (clk    )\n"                     
-        . "  , .rst 	            (rst    )\n"
-        . "  , .start             (start  )\n";
-    
-    #DONE is only connected for the first lane of the pipeline 
-    #note that  we are assuming symmetrical pipelines
-    if($seq == 0) {
-      $strBuf = "$strBuf"
-        . "  , .done              (done   )\n";
-    }
-    else {
-      $strBuf = "$strBuf"
-        . "  , .done              (       )\n";
-    }
-
-
-    # -------------------------------------------------------
-    # >>>>> connect signals to memory ports of child core
-    # -------------------------------------------------------  
-    
-    #AGAIN  iterate over all args2child in the function call (which are all presumed to be streams for now)
-    #and generate parameter connections for each stream argument
-    foreach my $key2 (keys %{$CODE{$topPar}{instructions}{$key}{args2child}}) {
-      
-      #pick up the name of the child port (i.e. Core's port) to connect to
-      (my $pname = $CODE{$topPar}{instructions}{$key}{args2child}{$key2}{nameChildPort}) =~ s/[\@\%]+//g;
-      
-      #pick up the name of the parent wire/stream that connects to the child port
-      (my $sname = $CODE{$topPar}{instructions}{$key}{args2child}{$key2}{name}) =~ s/[\@\%]+//g;
-                               
-      # Lmem connections for input streams
-      if($CODE{$topPar}{instructions}{$key}{args2child}{$key2}{dir} eq 'input') {
-        $strBuf = "$strBuf"
-          ."  , .LMEM_$pname"."_datain      (LMEM_$sname"."_rdata) \n"
-          ."  , .LMEM_$pname"."_addr        (LMEM_$sname"."_raddr) \n"
-          ."  , .LMEM_$pname"."_re          ()                    \n";
-        }#if
-        
-      # Lmem connections for output streams
-        else {
-          $strBuf = "$strBuf"
-          ."  , .LMEM_$pname"."_dataout     (LMEM_$sname"."_wdata) \n"
-          ."  , .LMEM_$pname"."_addr        (LMEM_$sname"."_waddr) \n"
-          ."  , .LMEM_$pname"."_we          (LMEM_$sname"."_we)    \n";
-        }#else       
-      #}#foreach   
-    }#foreach
-  
-    #now that ports are connected, close the module declaration
-    $strBuf = "$strBuf"
-      . ");\n";
-      
-    print "TyBEC: Instantiated module core$seq of type CorePipe_$key in $modName\n";   
-  }#foreach my $key (keys %{$CODE{$topPar}{instructions}}) { 
-  
-  $genCode =~ s/<childCores>/$strBuf/g;
-  $strBuf = "";
+  # ---------------------------------------------------------------
+  # >>>>> input valids, and output readys (create ports, and them)
+  # ---------------------------------------------------------------
+  $str_inputIvalidsAnded = "assign ivalid = ";
+ my $index = 1;
    
+  #I used to have separate iready's for each input, but redundant, a single should
+  #be used
+  foreach (@{$hash{consumes}}) {
+    (my $src = $_) =~ s/\%//;
+    $str_inputIvalids       = $str_inputIvalids."  , input ivalid_in".$index."_s0\n"; 
+    #$str_inputIreadys       = $str_inputIreadys."  , output iready_in".$index."_s0\n"; 
+    $str_inputIvalidsAnded  = $str_inputIvalidsAnded."ivalid_in".$index."_s0 & ";
+    #$str_ireadysFanout      = $str_ireadysFanout."assign iready_in".$index."_s0 = iready;\n";
+    $index++;
+  }
+  $str_inputIvalidsAnded = $str_inputIvalidsAnded." 1'b1;\n";
+  
+  # -------------------------------------------------------
+  # >>>>> add datapath logic
+  # -------------------------------------------------------
+
+  #---------------------------
+  #deal with constant operands
+  #---------------------------
+  
+  #if any of the input ports are constants, make sure they are not in the port list
+  for (my $i=0; $i<$vect; $i++) {
+    $firstOpInputPort  = "" if(                 ($hash{oper1form} eq 'constant'));
+    $secondOpInputPort = "" if(($nInOps > 1) && ($hash{oper2form} eq 'constant'));
+    $thirdOpInputPort  = "" if(($nInOps > 2) && ($hash{oper3form} eq 'constant'));
+  }
+
+  
+    
+  #---------------
+  #int
+  #---------------
+  #the LOAD operation of float is same as int, so dealt with here
+  if ( ($synthDtype =~ m/i\d+/)
+     ||(($synthDtype eq 'float32') && ($synthunit eq 'load'))
+     )
+  {
+  
+    #first check if any constant inputs, and assign them to local variables
+    #witgh name as they would have had if they were regular ports
+    #makes later code generation uniform
+    for (my $i=0; $i<$vect; $i++) {
+      $str_assignConstants  = $str_assignConstants. "wire [STREAMW-1:0] in1_s$i = $hash{oper1val};"
+        if ($hash{oper1form} eq 'constant');
+      $str_assignConstants  = $str_assignConstants. "wire [STREAMW-1:0] in2_s$i = $hash{oper2val};"
+        if (($nInOps > 1) && ($hash{oper2form} eq 'constant'));
+      $str_assignConstants  = $str_assignConstants. "wire [STREAMW-1:0] in3_s$i = $hash{oper3val};"
+        if (($nInOps > 2) && ($hash{oper3form} eq 'constant'));
+    }
+  
+    #choose operator symbol (applies for MOST Primitive instructions)
+    if    ($synthunit eq 'add')       {$operator = '+';}
+    elsif ($synthunit eq 'sub')       {$operator = '-';}
+    elsif ($synthunit eq 'mul')       {$operator = '*';}
+    elsif ( ($synthunit eq 'udiv')       
+          ||($synthunit eq 'sdiv'))   {$operator = '/';}
+    elsif ($synthunit eq 'compare')   {$operator = '==';}
+    elsif ($synthunit eq 'or')        {$operator = '|';}
+    #treat these specially later
+    elsif ($synthunit eq 'select')    {$operator = '';} 
+    elsif ($synthunit eq 'load')      {$operator = '';}
+    else                            {die "TyBEC: Unknown integer operator \"$synthunit\" used\n";}
+    
+
+    
+    #---------------
+    #create DATAPATH
+    #---------------
+    #depending on number of input operands, undo (or create) input data ports, and 
+    for (my $i=0; $i<$vect; $i++) {
+      
+      #"select" inst has 3 operands
+      if ($nInOps == 3){
+        $strBuf   = $strBuf."\nassign out1_pre_s$i = in1_s$i ? in2_s$i : in3_s$i;";
+        #add input port for 3rd (select) source operand, as template has only two by default
+        #also first input port is now a single bit
+        $firstOpInputPort = "  , input                     in1_s0";
+        $thirdOpInputPort = "  , input      [STREAMW-1:0]  in3_s0";
+      }
+      
+      #"load" inst, 1 operand
+      elsif ($nInOps==1){
+        $secondOpInputPort = "";
+        $strBuf   = $strBuf."\nassign out1_pre_s$i = in1_s$i;";
+      }
+      
+      #default units have 2 input operands
+      else{
+        $strBuf   = $strBuf."\nassign out1_pre_s$i = in1_s$i ".$operator." in2_s$i;";
+      }
+    }#for
+  }#if
+  
+  #---------------
+  #float
+  #---------------
+  elsif ($synthDtype eq 'float32') {
+    
+    #first check if any constant inputs, and assign them to local variables
+    #witgh name as they would have had if they were regular ports
+    #makes later code generation uniform
+    #float constants need a little function to convery floating poitn values to equivalent HEX for use in HDL
+    sub float2hex {return unpack ('H*' => pack 'f>' => shift)};
+    
+    #flopoco requires 2 extra bits 
+    $str_fpcEF = "wire [1:0] fpcEF = 2'b01;\n";
+
+    for (my $i=0; $i<$vect; $i++) {
+      $str_assignConstants  = $str_assignConstants. "wire [STREAMW-1:0] in1_s$i = {fpcEF, 32'h${\float2hex($hash{oper1val})} };"
+        if ($hash{oper1form} eq 'constant');
+      $str_assignConstants  = $str_assignConstants. "wire [STREAMW-1:0] in2_s$i = {fpcEF, 32'h${\float2hex($hash{oper2val})} };"
+        if (($nInOps > 1) && ($hash{oper2form} eq 'constant'));
+      $str_assignConstants  = $str_assignConstants. "wire [STREAMW-1:0] in3_s$i = {fpcEF, 32'h${\float2hex($hash{oper3val})} };"
+        if (($nInOps > 2) && ($hash{oper3form} eq 'constant'));
+    }    
+    
+    #dependign on operation, move flopoco IP to generated code folder
+    #and set module name and instance to use for code generation
+    #todo: pre-generated cores are used here. ideally I should
+    #generate flopoco at tybec's runtime
+    my $flopocoIPFile   ;
+    my $flopocoModule   ;
+    my $flopopModuleInst;
+    my $err             ;
+    my $flopocoCoresRoot="$TyBECROOTDIR/hdlCoresTparty/flopoco/cores";
+    
+    if    ($synthunit eq 'add'){  
+      #$flopocoIPFile    = "$flopocoCoresRoot/FPAddSingleDepth7.vhd";
+      $flopocoIPFile    = "$flopocoCoresRoot/FPAddSingleDepth7_stallable.vhd";
+      $flopocoModule    = "FPAdd_8_23_F300_uid2";
+      $flopopModuleInst = "fpAdd";
+      $err =copy("$flopocoIPFile", "$outputRTLDir");
+    }
+    elsif ($synthunit eq 'sub') {
+      $flopocoIPFile    = "$flopocoCoresRoot/FPSubSingleDepth7_stallable.vhd";
+      $flopocoModule    = "FPSub_8_23_F300_uid2";
+      $flopopModuleInst = "fpSub";
+      $err =copy("$flopocoIPFile", "$outputRTLDir");
+    }
+    elsif ($synthunit eq 'mul') {
+      #$flopocoIPFile    = "$flopocoCoresRoot/FPMultSingleDepth2.vhd";
+      $flopocoIPFile    = "$flopocoCoresRoot/FPMultSingleDepth2_stallable.vhd";
+      $flopocoModule    = "FPMult_8_23_8_23_8_23_F400_uid2";
+      $flopopModuleInst = "fpMul";
+      $err =copy("$flopocoIPFile", "$outputRTLDir");
+    }
+    elsif ($synthunit eq 'udiv') {
+      $flopocoIPFile    = "$flopocoCoresRoot/FPDivSingleDepth12_stallable.vhd";
+      $flopocoModule    = "FPDiv_8_23_F300_uid2";
+      $flopopModuleInst = "fpDiv";
+      $err =copy("$flopocoIPFile", "$outputRTLDir");
+    
+    }
+    else                        {die "TyBEC: Unknown float operator used\n";}    
+    
+    #instantiate flopoco IP in the node module
+
+    for (my $v=0; $v<$vect; $v++) {
+      $strBuf .= $strBuf ."$flopocoModule  $flopopModuleInst"."_$v\n"
+                      ."  ( .clk (clk)     \n"
+                      ."  , .rst (rst)     \n"
+                      ."  , .stall (~dontStall)     \n"
+                      ."  , .X   (in1_s$v)     \n"
+                      ."  , .Y   (in2_s$v)     \n"
+                      ."  , .R   (out1_pre_s$v)\n"
+                      .");"
+                      ;
+    }#for                      
+  }#if float
+
+  #--------------------------------
+  #types other than int and float?
+  #--------------------------------
+  else {die "TyBEC: only intNN and float32 currently supported for code generation\n";}
+  
+    #---------------
+    #ovalid logic
+    #---------------
+    #TODO: No need to have separate branchs for genersting int (1 cycle latecy) and float (n-cycle latency)
+    #ovalid logic as the same loop should work ok for 1-cycle latency
+    $str_ovalidLogic  .="//output valid\n"
+                      . "//follows ivalid with an N-cycle delay (latency of this unit)\n"
+                      . "//Also, only asserted with no back-pressure (oready asserted)\n"
+                      ;
+    #ovalid logic for floats; propagate ivalid along a shift register
+    if ($synthDtype eq 'float32') {
+      $str_ovalidLogic  .= "reg [$lat-1:0] valid_shifter;\n"
+                        .  "always @(posedge clk) begin\n"
+                        .  "  if(ivalid) begin\n"
+                        .  "    valid_shifter[0] <= ivalid;\n"
+                        ;
+      
+      #start shifting TO index 1, as 0th index does not follow pattern
+      foreach my $d (1..$lat-1) {
+        $str_ovalidLogic .= "    valid_shifter[$d]  <=  valid_shifter[$d-1];\n"; 
+      }                        
+      
+      $str_ovalidLogic  .= "  end\n";
+      $str_ovalidLogic  .= "  else begin\n";
+      
+      foreach my $d (0..$lat-1) {
+        $str_ovalidLogic .= "    valid_shifter[$d]  <=  valid_shifter[$d];\n"; 
+      }                        
+      $str_ovalidLogic  .= "  end //else\n";
+      $str_ovalidLogic  .= "end //always\n";
+
+      $str_ovalidLogic  .= "\nassign ovalid = valid_shifter[$lat-1] & oready;\n";
+
+    } 
+
+    #ovalid logic for ints
+    else {
+      $str_ovalidLogic  .= "reg ovalid_pre;\n";
+      $str_ovalidLogic  .="always @(posedge clk) begin\n"
+                        . "  if(rst)\n"
+                        . "    ovalid_pre <= 0;\n"
+                        . "  else\n" 
+                        . "    ovalid_pre <= ivalid & oready;\n"
+                        . "end\n"
+                        ;
+      $str_ovalidLogic  .= "\nassign ovalid = ovalid_pre;\n";
+    }                      
+  
+  $genCode  =~ s/<datapath>/$strBuf/g;
+  $genCode  =~ s/<oStrWidth>/$oStrWidth/g;
+  $genCode  =~ s/<firstOpInputPort>/$firstOpInputPort/g;
+  $genCode  =~ s/<secondOpInputPort>/$secondOpInputPort/g;
+  $genCode  =~ s/<thirdOpInputPort>/$thirdOpInputPort/g;
+  $genCode  =~ s/<inputIvalids>/$str_inputIvalids/g;
+  #$genCode  =~ s/<inputReadys>/$str_inputIreadys/g; #replaced by a single iready output
+  $genCode  =~ s/<inputIvalidsAnded>/$str_inputIvalidsAnded/g;
+  $genCode  =~ s/<ireadysFanout>/$str_ireadysFanout/g;
+  $genCode  =~ s/<assignConstants>/$str_assignConstants/g;
+  $genCode  =~ s/<instFifoBuff>/$str_instFifoBuff/g;
+  $genCode  =~ s/<ovalidLogic>/$str_ovalidLogic/g;
+  $genCode  =~ s/<fpcEF>/$str_fpcEF/g;
+  $strBuf   = "";
+  $strBuf = "";
+  
   # --------------------------------
   # >>>>> Write to file
   # --------------------------------
   $genCode =~ s/\r//g; #to remove the ^M  
   print $fhGen $genCode;
-
-  print "TyBEC: Generated module $modName for TyTra-IR design $designName with top level function $CODE{$leafPipe}{funcName}\n";
-  return;  
-}#genComputeUnit()
-
+  
+  print "TyBEC: Generated module $modName\n";  
+} 
 
 # ============================================================================
-# GENERATE Compute DEVICE
-# ============================================================================
-# 
+# GENERATE map node -- hiearchical (functions)
+# ==============================================5==============================
 
-sub genComputeDevice {
-  #die "Too many arguments for subroutine" unless @_ <= 6;
-  #die "Too few arguments for subroutine" unless @_ >= 6;   
-
+sub genMapNode_hier {
   # --------------------------------
   # >>> ARGS
   # --------------------------------
-  my $fhGen       = $_[0];  #file handler for output file
-  my $modName     = $_[1];  #module_name
-  my $designName  = $_[2];  #design name
-  my $numPipes    = $_[3];  #number of identical pipeline stages (C1)
-  my %CODE       = %{$_[4]};  #the hash for the code
-  
-  my $leafPipe  = $_[5];  #name of leaf level pipeline function
-  my $topPar;
-  
-  if($numPipes > 1) {
-    $topPar = $_[6]; #name of top level par function, if applicable
-  }
-  
+  my  ($fhGen             #file handler for output file
+      ,$modName           #module_name
+      ,$designName
+      ,$outputRTLDir
+      ,$dfgroup
+      ,$hashref
+      ,$vect      
+      ) = @_; 
+      
+  my %hash        = %{$hashref};  #the hash from parsed code for this pipe function
   
   # --------------------------------
   # >>>>> Locals
   # --------------------------------
   my $timeStamp   = localtime(time);
   my $strBuf = ""; # temp string buffer used in code generation 
+  my $strBuf2 = ""; # temp string buffer used in code generation 
 
-  # --------------------------------
-  # >>>> Load template file
-  # --------------------------------
-  my $templateFileName = "$TyBECROOTDIR/hdlGenTemplates/ComputeDevice.template.v"; 
-  open (my $fhTemplate, '<', $templateFileName)
-    or die "Could not open file '$templateFileName' $!";     
+  # ---------------------------------------
+  # >>>> Load template file, read contents
+  # ---------------------------------------
+  my $templateFileName = "$TyBECROOTDIR/hdlGenTemplates/template.mapnode_hier.v"; 
+  #$templateFileName = "$TyBECROOTDIR/hdlGenTemplates/template.main.v" if ($dfgroup eq 'main');
   
-  # --------------------------------
-  # >>>> Read template contents into string
-  # --------------------------------
+  $templateFileName = "$TyBECROOTDIR/hdlGenTemplates/template.main.v" if ($dfgroup eq 'main');
+  
+  #$templateFileName = "$TyBECROOTDIR/hdlGenTemplates/template.mapnode_hier.v" if ($dfgroup eq 'main');
+      ## TODO/NOTE:: Doing this temporarilty as I had not committed the map template
+  open (my $fhTemplate, '<', $templateFileName)
+    or die "Could not open file '$templateFileName' $!"; 
+
   my $genCode = read_file ($fhTemplate);
   close $fhTemplate;
 
   # --------------------------------
-  # >>>>> Update header 
+  # >>>>> Update header, module name and parameter
   # --------------------------------
   $genCode =~ s/<module_name>/$modName/g;
   $genCode =~ s/<design_name>/$designName/g;
   $genCode =~ s/<gen_ver>/$main::tybecRelease/g;
   $genCode =~ s/<timeStamp>/$timeStamp/g;
-
+  
+  #$strBuf = $dataw;
+  #$genCode =~ s/<dataw>/$strBuf/g;
+  #$strBuf = "";
+  
   # -------------------------------------------------------
-  # >>>>>>>>>>> Instantiate CORE <<<<<<<<<<<<<<<<<<<
+  # set latency
   # -------------------------------------------------------
-
+  #now redundant as I dont have fixed latency kernels
+  #my $lat = $main::CODE{main}{performance}{lat};
+  #$genCode =~ s/<latency>/$lat/;  
+  
   # -------------------------------------------------------
-  # >>>>> connect parameters in child instantiation (ComputeUnit)
+  # >>>>> dataw
   # -------------------------------------------------------
-  # We are at the Compute Device level, so the stream objects have a 
-  # 1-1 with ports, which have a 1-1 with the arguments (streaming variables only)
-  # of the top level module
-  foreach my $key (keys %{$CODE{launch}{stream_objects}}) {   
-    my $name = $CODE{launch}{stream_objects}{$key}{portConn}; #the relevant port    
-    # input streams
-    if($CODE{launch}{stream_objects}{$key}{dir} eq 'in') {
-      $strBuf = "$strBuf"
-        ."  , .STRM_$name"."_W           (`STRM_$name"."_W          )\n"
-        ."  , .NDims_$name"."            (`NDims_$name"."           )\n"
-        ."  , .Dim1Length_$name"."       (`Dim1Length_$name"."      )\n"
-        ."  , .LinearLength_$name"."     (`LinearLength_$name"."    )\n"
-        ."  , .IndexStartDim1_$name"."   (`IndexStartDim1_$name"."  )\n"
-        ."  , .IndexEndDim1_$name"."     (`IndexEndDim1_$name"."    )\n"
-        ."  , .IndexStartLinear_$name"." (`IndexStartLinear_$name".")\n"
-        ."  , .IndexEndLinear_$name"."   (`IndexEndLinear_$name"."  )\n"           
-        ."  , .MEM_DATA_W_$name"."       (`MEM_DATA_W_$name"."      )\n"    
-        ."  , .MEM_ADDR_W_$name"."       (`MEM_ADDR_W_$name"."      )\n"  
-        ."  , .MEM_STARTADDR_$name"."    (`MEM_STARTADDR_$name"."   )\n"        
-   }#if
+  my $datat; #complete type (e.g i32)
+  my $dataw; #width in bits
+  my $dataBase; #base type (ui, i, or float)
+  
+  if ($dfgroup eq 'main') {
+    #TODO: I am using the data type of the first stream I see in main (connectd to global memory object) to set data type in main
+    #but this is artificially limiting  
+    #$strBuf = $dataw;
+    foreach (keys %{$main::CODE{main}{symbols}} ) {
+      if ($main::CODE{main}{symbols}{$_}{cat} eq 'streamread') {
+        $datat = $main::CODE{main}{symbols}{$_}{dtype};
+      }
+    }
+  } 
+  else {
+    $datat = $hash{synthDtype};
+  }
+  
+  #extract base type and width
+  ($dataw = $datat)     =~ s/\D*//g;
+  ($dataBase = $datat)  =~ s/\d*//g;
+  
+  #set stream width, +2 for floating types (for comp with flopoco)
+    #but dont add +s in main, as we explicitly add/remove these 2 bits in main for upwards 32-bit compatibility
+  my $streamw;
+  if(($dataBase eq 'float') && ($dfgroup ne 'main')) {$streamw=$dataw+2;}
+  else                                               {$streamw=$dataw;}
+  
+  
+  
+  $genCode =~ s/<dataw>/$dataw/g;
+  $genCode =~ s/<streamw>/$streamw/g;
+  
+  
+  
+  # -------------------------------------------------------
+  # >>>>> 
+  # -------------------------------------------------------
+  #string buffers for creating code for different parts of the template
+  my $strPorts      = "";
+  my $strInsts      = "\n// Instantiations\n";
+  my $strConns      = "\n// Data and control connection wires\n";
+  my $str_ovalids   = "";
+  my $str_ireadysAnd= "";
+  my $str_ivalids   = "";
+  my $str_oreadys   = "";
+  my $str_ivalidsAnd= "assign ivalid = 1'b1\n";
+  my $str_oreadysAnd= "assign oready = 1'b1\n";
+  my $str_ireadyConns= "";
+  my $excFieldFlopoco='';
+  my $flPre='';
+  my $flPst='';  
+  # -------------------------------------------------------
+  # >>>>> prepend flopoco control bits if main
+  # -------------------------------------------------------
+  if(($dataBase eq 'float') && ($dfgroup eq 'main')) {
+    $excFieldFlopoco = 
+     "//Exception fields for flopoco                                         \n"
+    ."//A 2-bit exception field                                              \n"
+    ."//00 for zero, 01 for normal numbers, 10 for infinities, and 11 for NaN\n"
+    ."wire [1:0] fpcEF = 2'b01;                                              \n";
+    $flPre = '{fpcEF,';
+    $flPst = '}';
+  }
+  
+  
+  #Loop through all connected groups till you get to  group against this function
+  my @nodes_conn = $main::dfGraph->weakly_connected_components();
+  foreach (@nodes_conn) { 
+    my @conn_group_items = @{$_};
+    my ($dfg, undef) = split('\.',$conn_group_items[0],2); 
     
-    # output streams; treated same for now, but may need differentiation      
-    else {
-      $strBuf = "$strBuf"
-        ."  , .STRM_$name"."_W           (`STRM_$name"."_W          )\n"
-        ."  , .NDims_$name"."            (`NDims_$name"."           )\n"
-        ."  , .Dim1Length_$name"."       (`Dim1Length_$name"."      )\n"
-        ."  , .LinearLength_$name"."     (`LinearLength_$name"."    )\n"
-        ."  , .IndexStartDim1_$name"."   (`IndexStartDim1_$name"."  )\n"
-        ."  , .IndexEndDim1_$name"."     (`IndexEndDim1_$name"."    )\n"
-        ."  , .IndexStartLinear_$name"." (`IndexStartLinear_$name".")\n"
-        ."  , .IndexEndLinear_$name"."   (`IndexEndLinear_$name"."  )\n"           
-        ."  , .MEM_DATA_W_$name"."       (`MEM_DATA_W_$name"."      )\n"    
-        ."  , .MEM_ADDR_W_$name"."       (`MEM_ADDR_W_$name"."      )\n"  
-        ."  , .MEM_STARTADDR_$name"."    (`MEM_STARTADDR_$name"."   )\n"        
-    }#else 
-  }#foreach
-  $genCode =~ s/<childCore_parameter_connections>/$strBuf/g;
-  $strBuf = "";
+    
+    #we are at the connected group for this function \
+    ##TODO: If it is truly distributed, I shouldnt need to call to do this... I will have a single call that creates RTL for ALL modules
+    if($dfg eq $dfgroup) { 
+      #---------------------------------------------------------------------
+      # INSTANTIATIONS
+      #---------------------------------------------------------------------
+      #a local hash to keep track of IREADYs that need to be collected (anded) 
+      #applies to a oneProducerOneSignal-to-manyConsumer scenario
+      my %iReadyHash;
       
+      #now loop over all vertices (nodes) in this connected group, and instantiate them
+      foreach my $item (@conn_group_items) {
+        my $parentFunc= $main::dfGraph -> get_vertex_attribute ($item, 'parentFunc');
+        my $symbol    = $main::dfGraph -> get_vertex_attribute ($item, 'symbol'    );
+        (my $ident =  $symbol) =~ s/(%|@)//; #remove %/@
+        my $cat       = $main::CODE{$parentFunc}{symbols}{$symbol}{cat};
+        
+        
+        #---------------------------------
+        #ports
+        #---------------------------------
+        if(($cat eq 'arg') || ($cat eq 'func-arg')) {
+          my $dir =  $main::CODE{$parentFunc}{symbols}{$symbol}{dir};
+          
+          #I should have a single code generation block, no matter what the vectorization
+          #if($vect==1) {
+          #  $strPorts  = $strPorts."\n"
+          #            . "  , $dir"." [STREAMW-1:0] $ident"
+          #            ;
+          #}
+          #else {
+          
+          #create data ports, input and output
+          for (my $i=0; $i<$vect; $i++) {
+            $strPorts .= "\n"
+                      ."  , $dir"." [STREAMW-1:0]  $ident"."_s$i\n"
+                      ;
+          }#for
+          
+          #create input valids from all inputs, and AND them together:
+          if($dir eq 'input') {
+            $str_ivalids     = $str_ivalids."  , input ivalid_".$ident."_s0\n"; 
+            $str_ivalidsAnd  = $str_ivalidsAnd."  & ivalid_".$ident."_s0\n";
+          }
+          
+          #create output readys from all outputs, and AND them together:
+          if($dir eq 'output') {
+            $str_oreadys     = $str_oreadys."  , input oready_".$ident."_s0\n"; 
+            $str_oreadysAnd  = $str_oreadysAnd."  & oready_".$ident."_s0\n";
+          }
+          #}#else
+        }#if
+        
+        #incase of main, it can be alloca port as well
+        #TODO: direction should be picked up from the edge, not the alloca node, since there can be multiple streams (both in an out)
+        #from the same alloca object
+        if($cat eq 'alloca') {
+          #loop over all stream connections from this alloca object
+          foreach my $key (keys %{$main::CODE{$parentFunc}{symbols}{$symbol}{streamConn}}) {
+            my $dir  =  $main::CODE{$parentFunc}{symbols}{$symbol}{streamConn}{$key}{dir};
+            my $name =  $main::CODE{$parentFunc}{symbols}{$symbol}{streamConn}{$key}{name};
+            $name =~ s/(@|%)//;
+            
+            #if main, then my vectorized data wires are packed into a single bus
+            if($dfgroup eq 'main') {
+              $strPorts  = $strPorts."\n"
+                        . "  , $dir"." [STREAMW-1:0]  $name\n"
+                        ;
+            }
+            #if not, the vector elements are separately available
+            else {
+              for (my $i=0; $i<$vect; $i++) {
+              $strPorts  = $strPorts."\n"
+                        . "  , $dir"." [STREAMW-1:0]  $name"."_s$i\n"
+                        ;
+              }#for
+            }
+           #push the port onto  hash for later use (in OCL code generation, required for main only)
+           $main::CODE{$parentFunc}{allocaports}{$name}{dir} = $dir;
+          }
+        }
+        
+        #-----------------------------
+        #instantion of child modules
+        #-----------------------------
+        if( ($cat eq 'impscal') 
+          ||($cat eq 'func-arg') 
+          ||($cat eq 'funcall')
+          ||($cat eq 'fifobuffer')
+          ||($cat eq 'smache')
+          ||($cat eq 'autoindex')
+          ){
+          #remove _N from identity of funcall instructions
+          #$ident =~ s/\.\d+// if($cat eq 'funcall');
+          $ident =~ s/\_\d+$// if($cat eq 'funcall');
+
+          #name of module to instantiate
+          my $module2Inst = $parentFunc."_".$ident;
+          
+          for (my $v=0; $v<$vect; $v++) {
+            my $modInstanceName = $module2Inst."_i_s$v";
+              
+            #if I need to extract scalar from packed vector, what are the hi/lo bits
+            my $lo = $v*$streamw;
+            my $hi = ($v+1)*$streamw-1;
+          #-----------------------------------------
+            #common control signals
+            $strInsts = $strInsts."\n"
+                      . "$module2Inst \n"
+#                      . "#()\n"
+                      . "$modInstanceName (\n"
+                      . "  .clk    (clk)\n" 
+                      . ", .rst    (rst)\n" 	
+                      ;
+                      
+            #connections -- func-args
+            #-----------------------
+            #if $item is a func-arg (a compute node that is also an argument), it needs 
+            #outport data and connections that are  not exposed by the edges
+            #(because it has no "consumer")
+            if ($cat eq 'func-arg') {
+              my $dir =  $main::CODE{$parentFunc}{symbols}{$symbol}{dir};
+              $strInsts .= ", .out1_s0  ( $ident"."_s$v)\n"; 
+              
+              if($dir eq 'output') {
+                #ovalid for this func-arg is used to create the global ovalid
+                #and since this is a terminal node, it is fed the global oready
+                $strInsts.= ", .ovalid (ovalid_$ident"."_s$v)\n"
+                          . ", .oready (oready)\n"
+                          ;    
+                #each generated module for a vector element has its own ovalid
+                $strConns .= "\nwire ovalid_$ident"."_s$v;";
+                $str_ovalids .= "        ovalid_$ident"."_s$v &\n";
+              }
+            }
+            
+            #connections -- outputs
+            #-----------------------
+            my @succs = $main::dfGraph->successors($item);
+            foreach my $consumer (@succs) {
+              #Loop over multi-edges (that is, multiple wires between prod and cons)
+              #if applicable
+              my @multiedges = $main::dfGraph->get_multiedge_ids($item, $consumer);
+              foreach my $id (@multiedges) {
+                #get edge properties
+                my $connection  = $main::dfGraph ->get_edge_attribute_by_id ( $item, $consumer, $id, 'connection' );
+                my $pnode_pos   = $main::dfGraph ->get_edge_attribute_by_id ( $item, $consumer, $id, 'pnode_pos'  );
+                my $cnode_pos   = $main::dfGraph ->get_edge_attribute_by_id ( $item, $consumer, $id, 'cnode_pos'  );
+                my $pnode_local = $main::dfGraph ->get_edge_attribute_by_id ( $item, $consumer, $id, 'pnode_local');
+                my $cnode_local = $main::dfGraph ->get_edge_attribute_by_id ( $item, $consumer, $id, 'cnode_local');
+                my $pnode_cat   = $main::dfGraph ->get_edge_attribute_by_id ( $item, $consumer, $id, 'pnode_cat'  );
+                my $cnode_cat   = $main::dfGraph ->get_edge_attribute_by_id ( $item, $consumer, $id, 'cnode_cat'  );
+                $connection =~ s/(%|@)//; 
+                
+                #condition variable indicating consumer is a port (not an imp-scalar or a func-call)
+                my $consumerisPort = ( ($cnode_cat eq 'arg') 
+                                    || ($cnode_cat eq 'func-arg') 
+                                    || ($cnode_cat eq 'alloca') 
+                                    || ($cnode_cat eq 'streamread') 
+                                    || ($cnode_cat eq 'streamwrite')
+                                    ); #redundant?
+                                    
+                #condition variable indicating consumer is a module (will require explicitly declated connection wires)
+                my $consumerisModule  =  ($cnode_cat eq 'impscal') 
+                                      || ($cnode_cat eq 'func-arg') 
+                                      || ($cnode_cat eq 'funcall') 
+                                      || ($cnode_cat eq 'fifobuffer') 
+                                      || ($cnode_cat eq 'smache') 
+                                      ;
+                #condition indicating producer is node, as node modules have different port naming
+                #conventions (single oready, named "oready")
+                my $producerisLeafNode =  ($pnode_cat eq 'impscal')
+                                       || ($pnode_cat eq 'fifobuffer')
+                                       ;            
+                                       
+                my $producerisBuffer =  ($pnode_cat eq 'fifobuffer')
+                                     || ($pnode_cat eq 'smache')
+                                     ;
+                                     
+                my $producerisAutoindex = ($pnode_cat eq 'autoindex');
+
+                #depending on location in the vector, we will either append _sX
+                #or choose the correct data slice (main only)
+                if ($dfgroup eq 'main') {$connection = $connection."[$hi:$lo]";}
+                else                    {$connection = $connection."_s$v";}
+
+                #data port connection 
+                #child ports data port is always s0
+                $strInsts   .= ", .$pnode_local"."_s0"."  ( $connection )\n";
+                
+                #each generated module for a vector element has its own ovalid
+                #$strConns    .= "\nwire ovalid_s$v;\n";
+                #$str_ovalids .= "        ovalid_s$v &\n";
+                
+                #the consumer-side axi signal connections (and requirement of explicit connection wires)
+                #depend on whether consumer is a another module instance, or direct connection to parent port
+                my $app = '';
+                if ($consumerisModule) {
+                  #connection wires
+                  $strConns .= "\nwire [STREAMW-1:0]  $connection;";
+                  #valid signal is names after _module_, not the _connection_, as every module has a _single_ ovalid
+                  #which should be used for ALL consumers. See NOTES, 2017.07.15
+                  #$strConns .= "\nwire valid_$connection;"; 
+                  $strConns .= "\nwire valid_$ident;"; 
+                  $strConns .= "\nwire ready_$connection;";
+                  #control port connetions
+                  #if producer is fifobuffer, it can have multiple ovalids (this is the only case)
+                  #so the ovalids are appended with relevant output data identifieer
+                  $app = "_$pnode_local"."_s$v" if $producerisBuffer;
+                  #$strInsts .= ", .ovalid$app (valid_$connection)\n";
+                  $strInsts .= ", .ovalid$app (valid_$ident)\n";
+                  
+                  #oready 
+                  #------
+                  #is named differently depending on whether or not producer is a leaf node
+                  #as leaf nodes have a single oready named "oready"
+                  #also, autoindex do not have oreadys
+                  $app = '';
+                  if ($producerisLeafNode) {
+                    #if producer is fifobuffer, it can have multiple oreadys (this is the only case)
+                    #so the ovalids are appended with relevant output data identifieer
+                    $app = "_$pnode_local"."_s$v" if $producerisBuffer;
+                    $strInsts .=  ", .oready$app (ready_$connection)\n";
+                    #TODO: if multiple consumers for this leaf node, then the single OREADY
+                    #has to be distributed across nodes
+                  }
+                  elsif ($producerisAutoindex) {
+                    $strInsts .= '';
+                  }
+                  else {
+                    $strInsts .=  ", .oready_$pnode_local"."_s0 (ready_$connection) \n";}
+                }
+                
+                #consumer is parent port
+                #so the ovalid from the producer should be used to create the global ovalid
+                else {
+                  $strConns   .= "\nwire ovalid_$ident"."_s$v;";
+                  $str_ovalids.= "        ovalid_$ident"."_s$v &\n";
+                  $strInsts   .=", .oready_$pnode_local\_s0 (oready)\n"   #20190205
+                              . ", .ovalid (ovalid_$ident"."_s$v)\n"
+                              ;
+                }
+                
+                
+                #autoindex requires special treatment, as it does not have a predecessor
+                #so it is only a consumer. We need to find the right trigger for it
+                if ($pnode_cat eq 'autoindex'){
+                
+                  my $trigger;
+                  #this is nested _over_ another counter, so input trigger is output wrap trigger 
+                  #of that counter.
+                  if (exists $main::CODE{$parentFunc}{symbols}{$symbol}{nestOver}) {
+                    my $nestOver = $main::CODE{$parentFunc}{symbols}{$symbol}{nestOver};
+                    my $nestOverConn = $main::CODE{$parentFunc}{symbols}{$nestOver}{produces}[0];
+                    $nestOverConn =~ s/(%|@)//;
+                    $trigger = "trig_wrap_$nestOverConn"."_s0";
+                  }
+                  else {
+                    #find the source stream for creating the autoindex
+                    #then find it's VALID (whose name depends on whether or not is an  input arg)
+                    #to use as trigger
+                    my $sstream = $main::CODE{$parentFunc}{symbols}{$symbol}{sstream};
+                    my $sstream_cat = $main::CODE{$parentFunc}{symbols}{$sstream}{cat};
+                    $sstream =~ s/(%|@)//; 
+                    if ($sstream_cat eq 'arg')  {$trigger = "ivalid";}
+                    else                        {$trigger = "valid_$sstream"."_s0";}
+          
+                  }
+                  #connect with the identified trigger
+                  $strInsts .=  ", .trig_count ($trigger) \n";
+                  
+                  #create and connect to output wrap trigger signal
+                  $strConns .= "\nwire trig_wrap_$connection;";
+                  $strInsts .=  ", .trig_wrap  (trig_wrap_$connection) \n";
+                }
+              }#foreach my $id (@multiedges) {
+            }#foreach consumer
+            
+            
+            #connections -- inputs
+            #-----------------------
+            my @preds = $main::dfGraph->predecessors($item);
+            foreach my $producer (@preds) {
+              
+              #get producer identifier (it's name in the DFG graph is quite mangled)
+              my $psymbol    = $main::dfGraph -> get_vertex_attribute ($producer, 'symbol'    );
+              (my $pident =  $psymbol)  =~ s/(%|@)//; #remove %/@
+              $pident                   =~ s/\_\d+$//; #remove _N subscript
+              
+              #Loop over multi-edges, if applicable
+              my @multiedges = $main::dfGraph->get_multiedge_ids($producer, $item);
+              foreach my $id (@multiedges) {
+                #get edge properties
+                my $connection  = $main::dfGraph ->get_edge_attribute_by_id ($producer, $item, $id, 'connection' );
+                my $pnode_pos   = $main::dfGraph ->get_edge_attribute_by_id ($producer, $item, $id, 'pnode_pos'  );
+                my $cnode_pos   = $main::dfGraph ->get_edge_attribute_by_id ($producer, $item, $id, 'cnode_pos'  );
+                my $pnode_local = $main::dfGraph ->get_edge_attribute_by_id ($producer, $item, $id, 'pnode_local');
+                my $cnode_local = $main::dfGraph ->get_edge_attribute_by_id ($producer, $item, $id, 'cnode_local');
+                my $pnode_cat   = $main::dfGraph ->get_edge_attribute_by_id ($producer, $item, $id, 'pnode_cat'  );
+                my $cnode_cat   = $main::dfGraph ->get_edge_attribute_by_id ($producer, $item, $id, 'cnode_cat'  );
+                
+                #print YELLOW;
+                #print "item = $item, producer = $producer, pnode_cat = $pnode_cat, cnode_cat = $cnode_cat\n";
+                #print RESET;
+                
+                #condition variable indicating producer a port (not another peer function)
+                my $producerisPort = ( ($pnode_cat eq 'arg') 
+                                    || ($pnode_cat eq 'alloca') 
+                                    || ($pnode_cat eq 'streamread') 
+                                    || ($pnode_cat eq 'streamwrite')
+                                    );
+
+                my $producerisModule =  ($pnode_cat eq 'impscal') 
+                                     || ($pnode_cat eq 'func-arg') 
+                                     || ($pnode_cat eq 'funcall')                                    
+                                     || ($pnode_cat eq 'fifobuffer')                                    
+                                     || ($pnode_cat eq 'smache')                                    
+                                     || ($pnode_cat eq 'autoindex')                                    
+                                     ;
+
+                $connection =~ s/(%|@)//; 
+                #depending on location in the vector, we will either append _sX
+                #or choose the correct data slice (main only)
+                if ($dfgroup eq 'main') {$connection = $connection."[$hi:$lo]";}
+                else                    {$connection = $connection."_s$v";}
+
+                #port for the $item
+                #child ports data port is always s0                
+                $strInsts   .= ", .$cnode_local"."_s0"."  ( $flPre $connection $flPst)\n";
+                 
+                #each generated module for a vector element has its own iready
+                $strConns   .= "\nwire iready_$ident"."_s$v;  \n";
+                
+                #$str_ireadysAnd = $str_ireadysAnd."        iready_$ident"."_s$v &\n";
+                #if producer is port (so this is first stage node), then use it to create the global IREADY
+                $str_ireadysAnd .= "        iready_$ident"."_s$v &\n" if ($producerisPort);
+
+                #the producer-side axi signal connections (and requirement of explicit connection wires)
+                #depend on whether producer is a another module instance, or direct connection to parent port
+                if ($producerisModule) {
+                  #connection wires
+                  $strConns .= "\nwire [STREAMW-1:0]  $connection;";
+                  #valid signal is names after _module_, not the _connection_, as every module has a _single_ ovalid
+                  #which should be used for ALL consumers. See NOTES, 2017.07.15                  
+                  #$strConns .= "\nwire valid_$connection;";
+                  $strConns .= "\nwire valid_$pident;";
+                  $strConns .= "\nwire ready_$connection;";
+                  
+                  #port connetions
+                  #we  have IVALID for EACH input port
+                  #IREADY is common for node
+                  #$strInsts .= ", .ivalid_$cnode_local"."_s$v (valid_$connection)\n"
+                  #$strInsts .= ", .ivalid_$cnode_local"."_s$v (valid_$pident)\n"
+                  $strInsts .= ", .ivalid_$cnode_local"."_s0 (valid_$pident)\n"
+                            .  ", .iready (iready_from_$ident)\n"
+                            ;
+                  #manyproducers-to-oneconsumer                            
+                  #a single, common iready is now fed to each predecessor's oready...
+                  #make those connections (glue logic) here (simple fan-out)
+                  $str_ireadyConns .= "wire iready_from_$ident;\n";
+                  #$str_ireadyConns .= "assign ready_$connection = iready_from_$ident;\n";
+                  #$str_ireadyConns .= "ready_$connection &= iready_from_$ident;\n";
+                  
+                  #oneproducer-to-manyconsumers
+                  #collect iready into hash, generate later
+                  push @{$iReadyHash{"ready_$connection"}}, "iready_from_$ident";
+                }
+                #producer is port; 
+                #ivalid connects directly to parent ivalid
+                #iready connects to local wire (which is ANDED to produce a global IREADY)
+                else {
+                  #$strInsts   .=", .ivalid_$cnode_local"."_s$v (ivalid)\n"
+                  $strInsts   .=", .ivalid_$cnode_local"."_s0 (ivalid)\n"
+                              . ", .iready (iready_$ident"."_s$v)\n"
+                              ;    
+                }
+              }
+            }#foreach -- input connections
+            
+            #complete 
+            $strInsts = $strInsts."\n"
+                      . ");\n"
+                      ;
+            
+            #this has to happen here as instantiations of different modules may legitimately have identical lines
+            $strInsts = $strInsts."\n"
+                      . "<instantiations>";
+            remove_duplicate_lines($strInsts); 
+            $genCode  =~ s/<instantiations>/$strInsts/g;
+            $strInsts = "";
+          }#for (my $v=0; $v<$vect; $v++) {
+        }#if(($cat eq 'impscal') || ($cat eq 'func-arg') || ($cat eq 'funcall')) {
+      }#foreach node  
+
+      #after looping over all inputs of all nodes, now go through the iReady hash and 
+      #create all ready signals
+      #See NOTES, for date: 2019.06.07 (or thereabout)
+      foreach my $readyConns (keys %iReadyHash) {
+        #make sure each connection in the list against this hash (ready connection wire) is unique
+        #duplications arise as the same connection is made from both prod and cons p.o.v.
+        my %hash = map {$_,1} @{$iReadyHash{$readyConns}};
+        my @readyConnsUniq = keys %hash;
+
+        #now generate first list of assigment, then loop over connections to and them into a single
+        #iready that should go to all predecessors        
+        $str_ireadyConns .= "assign $readyConns = 1'b1 ";        
+        foreach (@readyConnsUniq) {
+          $str_ireadyConns .= "& $_";
+        }
+        $str_ireadyConns .= ";\n";
+      } 
+      
+      #close IVALIDS and OREADY anding string
+      $str_ivalidsAnd = $str_ivalidsAnd."  ;\n";
+      $str_oreadysAnd = $str_oreadysAnd."  ;\n";
+
+   
+      #remove any duplicate wire/port declarations (created due to fanout)
+      #See: http://www.regular-expressions.info/duplicatelines.html
+      #$strPorts=~ s/^(.*)(\r?\n\1)+$/$1/mg;
+      #$strInsts=~ s/^(.*)(\r?\n\1)+$/$1/mg;
+      #$strConns=~ s/^(.*)(\r?\n\1)+$/$1/mg;
+      
+      remove_duplicate_lines($strPorts);
+      remove_duplicate_lines($strConns);
+      remove_duplicate_lines($str_ovalids);
+      remove_duplicate_lines($str_ireadysAnd);
+      remove_duplicate_lines($str_ivalidsAnd);
+      remove_duplicate_lines($str_oreadysAnd);
+      remove_duplicate_lines($str_ireadyConns);
+      
+      $genCode  =~ s/<ports>/$strPorts/g;
+      $genCode  =~ s/<connections>/$strConns/g;
+      $genCode  =~ s/<ovalids>/$str_ovalids/g;
+      $genCode  =~ s/<ireadysAnd>/$str_ireadysAnd/g;
+      $genCode  =~ s/<ivalids>/$str_ivalids/g;
+      $genCode  =~ s/<ivalidsAnd>/$str_ivalidsAnd/g;
+      $genCode  =~ s/<oreadys>/$str_oreadys/g;
+      $genCode  =~ s/<oreadysAnd>/$str_oreadysAnd/g;
+      $genCode  =~ s/<ireadyConns>/$str_ireadyConns/g;
+      $genCode  =~ s/<excFieldFlopoco>/$excFieldFlopoco/g;      
+      $genCode  =~ s/<instantiations>//g;
+      $strPorts = "";
+      $strInsts = "";
+      $strConns = "";
+    }
+  }
+  
   # --------------------------------
   # >>>>> Write to file
   # --------------------------------
   $genCode =~ s/\r//g; #to remove the ^M  
   print $fhGen $genCode;
-
-  print "TyBEC: Generated module $modName for TyTra-IR design $designName\n";
-  return; 
-}#genComputeDevice()
-
+  
+  print "TyBEC: Generated module $modName\n";  
+} 
 
 # ============================================================================
-# GENERATE Custom Configuration File
+# GENERATE TEST BENCH
 # ============================================================================
-# 
 
-sub genCustomConfig {
-  die "Too many arguments for subroutine" unless @_ <= 3;
-  die "Too few arguments for subroutine" unless @_ >= 3;   
-
+sub genTestbench {
   # --------------------------------
   # >>> ARGS
   # --------------------------------
-  my $fhGen       = $_[0];  #file handler for output file
-  my $designName  = $_[1];  #design name
-  my %fHash       = %{$_[2]};  #entire CODE hash 
+  my  ($fhGen             #file handler for output file
+      ,$modName           #module_name
+      ,$designName
+      ,$outputRTLDir
+      ,$ioVect
+      ) = @_; 
 
+
+      
+  my $dfgroup = 'main'; 
+  my %hash        = %{$main::CODE{main}};  #the hash from parsed code for this pipe function
+  
   # --------------------------------
   # >>>>> Locals
   # --------------------------------
   my $timeStamp   = localtime(time);
   my $strBuf = ""; # temp string buffer used in code generation 
 
-  # --------------------------------
-  # >>>> Load template file
-  # --------------------------------
-  my $templateFileName = "$TyBECROOTDIR/hdlGenTemplates/includeCustomConfig.template.v"; 
+  # ---------------------------------------
+  # >>>> Load template file, read contents
+  # ---------------------------------------
+  my $templateFileName = "$TyBECROOTDIR/hdlGenTemplates/template.testbench.v"; 
   open (my $fhTemplate, '<', $templateFileName)
-    or die "Could not open file '$templateFileName' $!";     
-  
-  # --------------------------------
-  # >>>> Read template contents into string
-  # --------------------------------
+    or die "Could not open file '$templateFileName' $!"; 
+
   my $genCode = read_file ($fhTemplate);
   close $fhTemplate;
+ 
+  my $cwd = getcwd; #pwd needed for passing absolute path of results to xilinx ISE testbench
 
   # --------------------------------
-  # >>>>> Update header 
+  # >>>>> Update header and module name 
   # --------------------------------
+  $genCode =~ s/<module_name>/$modName/g;
   $genCode =~ s/<design_name>/$designName/g;
   $genCode =~ s/<gen_ver>/$main::tybecRelease/g;
   $genCode =~ s/<timeStamp>/$timeStamp/g;
+  $genCode =~ s/<globalVect>/$ioVect/g;
+  
+  # -------------------------------------------------------
+  # >>>>> dataw, datat, streamw
+  # -------------------------------------------------------
+  my $datat; #complete type (e.g i32)
+  my $dataw; #width in bits
+  my $dataBase; #base type (ui, i, or float)
+  #TODO: I am using the data type of the first stream I see in main (connectd to global memory object) to set data type in the top as well
+  #but this is artificially limiting  $strBuf = $dataw;
+  foreach (keys %{$main::CODE{main}{symbols}} ) {
+    if ($main::CODE{main}{symbols}{$_}{cat} eq 'streamread') {
+      $datat = $main::CODE{main}{symbols}{$_}{dtype};
+      ($dataw = $datat)     =~ s/\D*//g;
+      ($dataBase = $datat)  =~ s/\d*//g;
+      #$dataw = $main::CODE{main}{symbols}{$_}{dtype};
+      #$dataw =~ s/\D*//;
+    }
+  }
+  $genCode =~ s/<dataw>/$dataw/g;
+  
 
+  
+  #stream-width
+  #same as dataw for ints, but for floats, we  need to add
+  #2 extra control bits as they are needed by flopoco
+  #my $streamw;
+  #if($dataBase eq 'float')  {$streamw=$dataw+2;}
+  #else                      {$streamw=$dataw;}
+  
+  #no need now, as flopoco control bits are added/removed internally for upwards host-code compatimilty
+  my $streamw = $dataw;
+  
+  $genCode =~ s/<streamw>/$streamw/g;
+  
+
+    
+  
+  # -------------------------------------------------------
+  # set latency
+  # -------------------------------------------------------
+  my $lat = $main::CODE{main}{performance}{lat};
+  $genCode =~ s/<latency>/$lat/;
 
   # -------------------------------------------------------
-  # >>>>> Define parameters for all the streams
+  # size
   # -------------------------------------------------------
-  my $dataW;
-  foreach my $key (keys %{$fHash{launch}{stream_objects}}) {   
-    my $pName = $fHash{launch}{stream_objects}{$key}{portConn}; #the relevant port    
+  my $size = $main::CODE{main}{bufsize};
+  $genCode =~ s/<size>/$size/g;
+
+  # -------------------------------------------------------
+  #buffers for creating code for different parts of the template
+  # -------------------------------------------------------
+  my $strPortWires  = "";
+  my $strChildPorts = "";
+  my $strDecGmemAr  = "";
+  my $strInitArrays = "";
+  my $strZeroPadAr  = "";
+  my $strAssignInput= "";
+  my $strAssignOuput= "";
+  my $strFpHelper   ="";
+  my $excFieldFlopoco='';
+  my $bits2realOpen = '';
+  my $bits2realClose= '';
+  my $readCResults  = '';
+  my $defFloat       = '';
+  my $resultCType    = '';
+  my $PT             = 'd';#default
+  my $getScalarResGold   = '';
+  my $getScalarResCalc   = '';
+  my $getScalarResCalcEnd= '';
+  my $result_t           = '';
+  my $getScalarResGold2Compare= '';
+  my $getScalarResCalc2Compare= '';
+  my $strpackDataIn  = '';
+  my $strpackDataOut = '';
+  my $str_ivalid_toduts  = ''; 
+  my $str_iready_fromduts= '';
+  my $str_wire_iready_fromduts= '';
+  
+  my $array4verifyingResult = '';
+  # -------------------------------------------------------
+  # if float, include helper and also define macro, and type of resultC
+  # also set how to print outputs using printfs (%d/%f)
+  # -------------------------------------------------------
+  if($dataBase eq 'float') {
+    my $srcdir = "$TyBECROOTDIR/hdlGenTemplates";
+    my $err;
+    #I was earlier copying this helper file into HDL folder, but it is only used by 
+    #testbench so best to keep it there
+    #$err =copy("$srcdir/template.spFloatHelpers.v" , "$outputRTLDir/../hdl/spFloatHelpers.v"); 
+    $err =copy("$srcdir/template.spFloatHelpers.v" , "$outputRTLDir/spFloatHelpers.v"); 
+    $strFpHelper = "//helper functions for SP-floats\n"
+#                 . "`include \"../hdl/spFloatHelpers.v\" "
+                 . "`include \"spFloatHelpers.v\" "
+                 ;
+    $defFloat = '`define FLOAT';
+    $PT       = 'f';
+  }
+  # -------------------------------------------------------
+  # read ground truth from C simulation, set output print type
+  # -------------------------------------------------------
+
+  #this is the typical case
+  #$readCResults = "\$readmemh(\"../../../../../../../c/verifyChex.dat\", resultfromC);\n";
+
+  #vivado likes absolute path
+  $readCResults =  "//Absolute path as readmemh behaviour unreliable across different simulators (vivado likes absolute path)\n";
+  $readCResults .= "\$readmemh(\"$cwd/../../c/ver3/verifyChex.dat\", resultfromC);\n";
+
+  #in some test cases, each tir version has its own C version, this is manually set in the generated testbench
+  #this is ugly FIXME
+  #$readCResults = "\$readmemh(\"../../../../../../../c/verX/verifyChex.dat\", resultfromC);\n";
+  
+  
+  if ($dataBase eq 'float') {
+  $readCResults = "$readCResults\n"
+                . ""
+                ;
+                
+  }
+
+  # -------------------------------------------------------
+  # how many total inputs/outputs? 
+  #   - create packed  busses
+  #   - connect Xple ivalids, ireadys
+  # -------------------------------------------------------
+  my $ninputs = 0;
+  my $noutputs = 0;
+  foreach my $key (keys %{$main::CODE{main}{allocaports}}) {
+    my $dir =$main::CODE{main}{allocaports}{$key}{dir};
+    $ninputs  = $ninputs+1  if($dir eq 'input');
+    $noutputs = $noutputs+1 if($dir eq 'output');
     
-    # extract data type and also calculate address width based on highest address
-    ($dataW=$fHash{launch}{stream_objects}{$key}{dataType})=~s/\D//g; #extract the number
-    my $addrW = log2($fHash{launch}{stream_objects}{$key}{endAddr});
+    #in case of multiple outputs, pick the last one for result verification
+    #since $key is name of the stream, I have to lookup the hash to find the corresponding memory array
+    #this should be deterministic FIXME
+    $array4verifyingResult = $main::CODE{main}{symbols}{"%$key"}{produces}[0] if($dir eq 'output');
+    $array4verifyingResult =~ s/\%//;
+  }
+  
+  #handle ivalid, iready, for each input
+  my $loopto = $noutputs;
+  $loopto = 1 if ($main::ocxTempVer eq 't08'); #for template version 9, inputs are coalesced (FIXME)
+  
+  foreach my $i (0..$loopto-1) {
+    my $c = ($i == 0) ? "" : ", ";
+    $str_ivalid_toduts        .= "$c"."ivalid_todut"; 
+    $str_iready_fromduts      .= "$c"."iready_fromdut$i";
+    $str_wire_iready_fromduts .= "wire iready_fromdut$i;\n";
+  }
+  
+  
+
+  # -------------------------------------------------------
+  # generate ports and connection in instantiation of DUT
+  # -------------------------------------------------------
+  
+  foreach my $key (keys %{$main::CODE{main}{allocaports}}){
+    #name of streamign port
+    my $name=$key;
+    my $nameInHash="%".$name;
+    my $nameWire = $name."_data";
     
-    #TODO: Some parameters are hardwired for 1D vectors; parmeterize them
+    #name of relevant memory object (global memory array)
+    my $nameOfMem;   
+    my $dir =$main::CODE{main}{allocaports}{$name}{dir};
     
-    # input streams
-    if($fHash{launch}{stream_objects}{$key}{dir} eq 'in') {
-      $strBuf = "$strBuf"
-        ."`define STRM_$pName"."_W           $dataW \n"
-        ."`define NDims_$pName"."            1 \n" #<--- TODO: HARDWIRED!
-        ."`define Dim1Length_$pName"."       $fHash{launch}{stream_objects}{$key}{length} \n"
-        ."`define LinearLength_$pName"."     $fHash{launch}{stream_objects}{$key}{length} \n"
-        ."`define IndexStartDim1_$pName"."   $fHash{launch}{stream_objects}{$key}{startAddr} \n"
-        ."`define IndexEndDim1_$pName"."     $fHash{launch}{stream_objects}{$key}{endAddr} \n"
-        ."`define IndexStartLinear_$pName"." $fHash{launch}{stream_objects}{$key}{startAddr} \n"
-        ."`define IndexEndLinear_$pName"."   $fHash{launch}{stream_objects}{$key}{endAddr} \n"           
-        ."`define MEM_DATA_W_$pName"."       $dataW \n"    
-        ."`define MEM_ADDR_W_$pName"."       $addrW \n"  
-        ."`define MEM_STARTADDR_$pName"."    $fHash{launch}{stream_objects}{$key}{startAddr} \n"        
-   }#if
+    #get name of mem
+    if($dir eq 'input') {$nameOfMem=$main::CODE{main}{symbols}{$nameInHash}{consumes}[0];}
+    else                {$nameOfMem=$main::CODE{main}{symbols}{$nameInHash}{produces}[0];}
+    $nameOfMem=~s/\%//;
+
     
-    # output streams; treated same for now, but may need differentiation      
+    #create connection wires
+    #if($ioVect==1){
+    #  $strPortWires = $strPortWires ."wire [`STREAMW-1:0] $name"."_data;\n";
+    #  $strChildPorts= $strChildPorts.", .$name"."  ($name"."_data)\n";
+    #}
+    #else {
+      #if($dir eq 'input'){
+        for (my $v=0; $v<$ioVect; $v++) {
+          $strPortWires = $strPortWires ."wire [`STREAMW-1:0] $name"."_data_s$v;\n";
+          $strChildPorts= $strChildPorts.", .$name"."_s$v"."  ($name"."_data_s$v)\n";
+        }
+      
+
+      #packing data wires in/out of DUT
+      #the scalars in vectors are organized big-endian order (higher elements of vector are towards MSB)
+      #so we have to count down when concatenating
+      for (my $v=$ioVect-1; $v>=0; $v--) {
+        if($dir eq 'input'){
+          $strpackDataIn  = $strpackDataIn
+                          . "                          ,$name"."_data_s$v\n"
+                          ;
+          }
+        else {
+         $strpackDataOut  = $strpackDataOut
+                          . ",$name"."_data_s$v "
+                          ;
+        }
+      }#for
+      
+
+      
+      #}
+      #else {
+      #  for (my $v=0; $v<$ioVect; $v++) {
+      #    $strPortWires = $strPortWires ."wire [`STREAMW-1:0] $name"."_data_s$v;\n";
+      #    $strChildPorts= $strChildPorts.", .$name"."_s$v ($name"."_data_s$v)\n";
+      #  }
+      #}
+    #}
+    
+    #declare and initialize global memory arrays
+    $strDecGmemAr = $strDecGmemAr ."reg [`DATAW-1:0]  $nameOfMem  [0:`SIZE-1];\n";
+    #print "nameInHash = $nameInHash\n";
+    
+    #if floats, then prepend with floating bias
+    if($dir eq 'input'){
+      if($dataBase eq 'float'){
+        $strInitArrays= $strInitArrays
+                      ."    $nameOfMem\[index0\] = realtobitsSingle(3.14+index0+1);\n";}
+      else {
+        $strInitArrays= $strInitArrays
+                      ."    $nameOfMem\[index0\] = index0+1;\n";}
+                      #."    $nameOfMem\[index0\] = index0;\n";}
+    }
+    else{
+      $strInitArrays= $strInitArrays."    $nameOfMem\[index0\] = 0;\n";
+      #for debug message
+      $genCode  =~ s/<outputData>/$nameOfMem/g;
+      }
+      
+    $strZeroPadAr = $strZeroPadAr ."$nameOfMem\[index1\] = 0;\n";
+    
+    #connect data wires to global memories
+    my $flPre= '';#extra pre/post characters when floatin data
+    my $flPst= '';#extra pre/post characters when floatin data
+    #if($ioVect==1){
+    #  if($dataBase eq 'float') {
+    #  $excFieldFlopoco = 
+    #     "//Exception fields for flopoco                                         \n"
+    #    ."//A 2-bit exception field                                              \n"
+    #    ."//00 for zero, 01 for normal numbers, 10 for infinities, and 11 for NaN\n"
+    #    ."wire [1:0] fpcEF = 2'b01;                                              \n";
+    #    $flPre = '{fpcEF,';
+    #    $flPst = '}';
+    #  }
+    #  
+    #  $strAssignInput = $strAssignInput ."assign $name"."_data = $flPre $nameOfMem\[lincount\] $flPst;\n"
+    #    if($dir eq 'input');
+    #  $strAssignOuput = $strAssignOuput  ."    $nameOfMem\[effaddr\] <= $nameWire"."_s$v;\n";
+    #    if($dir eq 'output');
+    #}
+    #else {
+      for (my $v=0; $v<$ioVect; $v++) {
+        
+        #the following is redundant now, as flopoco control bits are handled internally
+        #if($dataBase eq 'float') {
+        #  $excFieldFlopoco = 
+        #   "//Exception fields for flopoco                                         \n"
+        #  ."//A 2-bit exception field                                              \n"
+        #  ."//00 for zero, 01 for normal numbers, 10 for infinities, and 11 for NaN\n"
+        #  ."wire [1:0] fpcEF = 2'b01;                                              \n";
+        #  $flPre = '{fpcEF,';
+        #  $flPst = '}';
+        #}
+
+        if($dir eq 'input'){ 
+          $strAssignInput = $strAssignInput ."assign $name"."_data_s$v = $flPre $nameOfMem\[lincount+$v\] $flPst;\n"
+        } else {
+          my $sPos = $v*$dataw;
+          my $ePos = ($v+1)*$dataw-1;
+          #calculating starting and endign indices of relevant scalar from
+          #concatenated vector output
+            ##redundant as output is now already scalarized (unpacked)
+          $strAssignOuput = $strAssignOuput  
+                          ."    $nameOfMem\[effaddr+$v\] <= $nameWire"."_s$v;\n";
+          #$strAssignOuput = $strAssignOuput  ."    $nameOfMem\[effaddr\] <= $nameWire"."_s$v;\n";
+        }#else
+        #if($dir eq 'input') {
+        #  $strAssignInput = $strAssignInput ."assign $name"."_data_s$v = $nameOfMem\[lincount+$v\];\n";
+        #}
+        #else {
+        #  #$strAssignOuput = $strAssignOuput  ."    $nameOfMem\[effaddr+$v\] <= $nameWire"."_v$v;\n"
+        #
+        #                  #."    $nameOfMem\[effaddr+$v\] <= $nameWire"."[$ePos:$sPos];\n";
+        #}
+      }#for
+    #}
+    
+    #checking and displaying results
+    if ($dataBase eq 'float') {
+      $bits2realOpen      = 'bitstorealSingle(';
+      $bits2realClose     = ')';
+      $getScalarResGold   = "bitstorealSingle(resultfromC[index]);";
+      $getScalarResCalc   = "bitstorealSingle(";
+      $getScalarResCalcEnd= "[index]);";
+      $result_t           = 'real';
+      $getScalarResGold2Compare = "\$rtoi(`VERPREC*scalarResGold);";
+      $getScalarResCalc2Compare = "\$rtoi(`VERPREC*scalarResCalc);";
+    }
     else {
-      $strBuf = "$strBuf"
-        ."`define STRM_$pName"."_W           $dataW \n"
-        ."`define NDims_$pName"."            1 \n"
-        ."`define Dim1Length_$pName"."       $fHash{launch}{stream_objects}{$key}{length} \n"
-        ."`define LinearLength_$pName"."     $fHash{launch}{stream_objects}{$key}{length} \n"
-        ."`define IndexStartDim1_$pName"."   $fHash{launch}{stream_objects}{$key}{startAddr} \n"
-        ."`define IndexEndDim1_$pName"."     $fHash{launch}{stream_objects}{$key}{endAddr} \n"
-        ."`define IndexStartLinear_$pName"." $fHash{launch}{stream_objects}{$key}{startAddr} \n"
-        ."`define IndexEndLinear_$pName"."   $fHash{launch}{stream_objects}{$key}{endAddr} \n"           
-        ."`define MEM_DATA_W_$pName"."       $dataW \n"    
-        ."`define MEM_ADDR_W_$pName"."       $addrW \n"  
-        ."`define MEM_STARTADDR_$pName"."    $fHash{launch}{stream_objects}{$key}{startAddr} \n"        
-    }#else 
-  }#foreach
-  $genCode =~ s/<streamParameters>/$strBuf/g;
-  $strBuf = "";
-
-  # --------------------------------
-  # >>>>> Default Data Width parameter
-  # --------------------------------
-  # TODO: Just now it is simple taking the datawidth of last stream parsed
-  # assumption is thata all streams are uniform anyway. This needs to be updated
-  # possible IR should define this default dataW explicitly
-  $genCode =~ s/<DataW>/$dataW/g;
+      $getScalarResGold   = "resultfromC[index];";
+      $getScalarResCalc   = "";
+      $getScalarResCalcEnd= '[index];';
+      $result_t           = 'integer';
+      $getScalarResGold2Compare = "scalarResGold;";
+      $getScalarResCalc2Compare = "scalarResCalc;";
+    }
+    
+  }
+  
+  #remove first "," from generated strings where needed
+  $strpackDataIn  =~ s/,{1}/ /;
+  $strpackDataOut =~ s/,{1}/ /;
+  
+  #insert created strings into appropriate tag locations
+  $genCode  =~ s/<defFloat>/$defFloat/g;
+  $genCode  =~ s/<PT>/$PT/g;
+  $genCode  =~ s/<portwires>/$strPortWires/g;
+  $genCode  =~ s/<connectchildports>/$strChildPorts/g;
+  $genCode  =~ s/<declaregmemarrays>/$strDecGmemAr/g;
+  $genCode  =~ s/<initarrays>/$strInitArrays/g;
+  $genCode  =~ s/<zeropadarrays>/$strZeroPadAr/g;
+  $genCode  =~ s/<assigninputdata>/$strAssignInput/g;
+  $genCode  =~ s/<assignoutputdata>/$strAssignOuput/g;
+  $genCode  =~ s/<ioVect>/$ioVect/g;
+  $genCode  =~ s/<FpHelper>/$strFpHelper/g;
+  $genCode  =~ s/<streamw>/$streamw/g;
+  $genCode  =~ s/<excFieldFlopoco>/$excFieldFlopoco/g;
+  $genCode  =~ s/<bits2realOpen>/$bits2realOpen/g;
+  $genCode  =~ s/<bits2realClose>/$bits2realClose/g;
+  $genCode  =~ s/<readCResults>/$readCResults/;
+  $genCode  =~ s/<getScalarResGold>/$getScalarResGold/;
+  $genCode  =~ s/<getScalarResCalc>/$getScalarResCalc/;
+  $genCode  =~ s/<getScalarResCalcEnd>/$getScalarResCalcEnd/;
+  $genCode  =~ s/<result_t>/$result_t/g;
+  $genCode  =~ s/<getScalarResGold2Compare>/$getScalarResGold2Compare/g;
+  $genCode  =~ s/<getScalarResCalc2Compare>/$getScalarResCalc2Compare/g;
+  $genCode  =~ s/<packDataIn>/$strpackDataIn/g;
+  $genCode  =~ s/<packDataOut>/$strpackDataOut/g;
+  $genCode  =~ s/<ninputs>/$ninputs/g;
+  $genCode  =~ s/<noutputs>/$noutputs/g;
+  $genCode  =~ s/<ivalid_toduts>/$str_ivalid_toduts/g;
+  $genCode  =~ s/<iready_fromduts>/$str_iready_fromduts/g;
+  $genCode  =~ s/<wire_iready_fromduts>/$str_wire_iready_fromduts/g;
+  
+  $genCode  =~ s/<array4verifyingResult>/$array4verifyingResult/g;
   
   # --------------------------------
   # >>>>> Write to file
   # --------------------------------
   $genCode =~ s/\r//g; #to remove the ^M  
   print $fhGen $genCode;
+  
+  print "TyBEC: Generated module $modName\n";  
+  
+}  
 
-  print "TyBEC: Generated Custom Configuration file for TyTra-IR design $designName\n";
-  
-  return;
-  
-}#genCustomConfig()

@@ -1,0 +1,7 @@
+ver 1:
+------
+Vanilla version, nothing fancy, MINIMAL FOR TESTING used (stencils, no boundaries or autoindex)
+
+ver 2:
+-------
+Bring in the full IR, including boundaries and autoindex

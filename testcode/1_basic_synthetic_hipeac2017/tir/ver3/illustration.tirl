@@ -1,0 +1,256 @@
+;-- =============================================================================
+;-- Company      : Unversity of Glasgow, Comuting Science
+;-- Author:        Syed Waqar Nabi
+;-- 
+;-- Create Date  : 2017.01.03
+;-- Project Name : TyTra
+;--
+;-- Dependencies : 
+;--
+;-- Revision     : 
+;-- Revision 0.01. File Created
+;-- 
+;-- Conventions  : 
+;-- =============================================================================
+;--
+;-- =============================================================================
+;-- General Description
+;-- -----------------------------------------------------------------------------
+;-- Tytra-IR BACKEND file for the "illustration" code 
+;-- being used to update IR (primarily) for smart-buffering
+;-- 
+;-- This is the updated version using TIR-17
+;-- ** Version 1 ** Simple CG pipeline, no splits/merges, NDmaps and folds, or 
+;--    offsets
+;-- =============================================================================
+
+;-- *****************************************************************************
+;--                        *** MANAGE-IR ***  
+;-- *****************************************************************************
+;-- C-style macros 
+#define NDim1     256
+#define NLinear   256
+#define NLanes    1
+#define NLinearPL 1
+#define NKIter    1
+  ;-- numner of Kernel Iterations
+
+; *****************************************************************************
+;                        *** COMPUTE-IR ***
+; *****************************************************************************
+
+;-- ModuleID = 'top'
+  ;-- top level module for LLVM
+
+  
+; -----------------------------------------------------------------------------
+; -- ** kernel_map_f1
+; -----------------------------------------------------------------------------
+define void @kernel_map_f1( i32 %vin0_stream_load
+                          , i32 %vin1_stream_load
+                          , i32 %vconn0_stream_store
+                          , i32 %vconn1_stream_store
+                          ) pipe {
+  i32 %vin0_stream_load_i_p1 = i32 %vin0_stream_load, !tir.stream.offset !+1
+  i32 %vin0_stream_load_i_n1 = i32 %vin0_stream_load, !tir.stream.offset !-1
+  
+  ;-- counter for boundary conditions
+  i32 %ix = i32 0, !"counter" !0 !NLinear-1
+                          
+  ;-- boundary check comparisons
+  i1 %1   = icmp eq i32 %ix, 0 
+  i1 %2   = icmp eq i32 %ix, NLinear-1
+  i1 %3   = or i1 %1, %2
+                          
+  ;-- the kernel
+  i32 %4 = add i32 %vin0_stream_load, %vin1_stream_load
+  i32 %5 = mul i32 %vin0_stream_load, %vin1_stream_load
+  
+  ;-- select pass-through or kernel output based on boundary-check
+  i32 %vconn0_stream_store = select i1 %1, i32 %vin0_stream_load, i32 %4
+  i32 %vconn1_stream_store = select i1 %1, i32 %vin1_stream_load, i32 %5
+  ret void
+}
+
+; -----------------------------------------------------------------------------
+; -- ** kernel_unzip_A
+; -----------------------------------------------------------------------------
+
+define void @kernel_unzipt_A ( i32 %vconn0_stream_load 
+                             , i32 %vconn1_stream_load
+                             , i32 %vconn00_stream_store
+                             , i32 %vconn10_stream_store
+                             ) pipe {
+  i32 %vconn00_stream_store = add i32 %vconn0_stream_load, 0
+  i32 %vconn10_stream_store = add i32 %vconn1_stream_load, 0
+  ret void
+}
+
+; -----------------------------------------------------------------------------
+; -- ** kernel_map_f2
+; -----------------------------------------------------------------------------
+define void @kernel_map_f2 ( i32 %vconn10_stream_load
+                           , i32 %vconn100_stream_store
+                           ) pipe {
+  i32 %vconn100_store = add i32 %vconn10_stream_load, %vconn10_stream_load
+}
+
+; -----------------------------------------------------------------------------
+; -- ** kernel_fold_f2
+; -----------------------------------------------------------------------------
+define void @kernel_fold_f2 ( i32 %vconn00_stream_load
+                            , i32 @sconn000
+                            ) pipe {
+  ui32 @sconn000 = add ui32 %vconn00_stream_load, @sconn000
+}
+
+; -----------------------------------------------------------------------------
+; -- ** kernel_map_f3
+; -----------------------------------------------------------------------------
+define void @kernel_map_f2 ( i32 %vconn100_stream_load
+                           , i32 %vout_stream_store
+                           , i32 %sconn000
+                           ) pipe {
+  ui32 %vout_stream_store = add ui32 %sconn000, %vconn100_stream_load
+}
+
+;-- ----------------------------------------------------------------------------
+;-- ** Connecting the two kernel pipelines in a (CG) PIPE block
+;-- ----------------------------------------------------------------------------
+define void @kernelTop  ( i32 %vin0_stream_load
+                        , i32 %vin1_stream_load
+                        , i32 %s0
+                        , i32 %vout_stream_store
+                        )
+{
+  ;----------------------------------------------
+  ;-- create local connection registers/memories,
+  ;-- and their associated streams
+  ;----------------------------------------------
+  ;-- the AUTO keyword means we want TyBEC to figure out the size
+  ;-- of this connecting memory/register
+  ;-- The addrspace(0) refers to private, on-chip memory
+  @vconn0   = addrspace(0) [AUTO x i32]
+  @vconn1   = addrspace(0) [AUTO x i32]
+  @vconn00  = addrspace(0) [AUTO x i32]
+  @vconn10  = addrspace(0) [AUTO x i32]
+  @vconn100 = addrspace(0) [AUTO x i32]
+  
+  ;-- "global" memory variable is initialized based on input scalar
+  ;-- this memory (register) is used for the reduction operation
+  ;-- it is kept in the top scope as it is a connection variable
+  ;-- between two CG kernels
+  @sconn000 = addrspace(0)  i32 %s0
+  
+  ;-- load creates an output stream (from the memory's POV), and store creates an input stream to it
+  ;-- streamFifo types can translate to accessing FIFO buffers, or simple to a shared register
+  ;--   streamFiFo types do not have sizes or starting addresses (unlike stream1d etc)
+            %vconn0_stream_load  = load i32,  i32* @vconn0, !tir.mem.type !streamFifo 
+  store i32 %vconn0_stream_store,             i32* @vconn0, !tir.mem.type !streamFifo 
+
+            %vconn1_stream_load  = load i32,  i32* @vconn1, !tir.mem.type !streamFifo 
+  store i32 %vconn1_stream_store,             i32* @vconn1, !tir.mem.type !streamFifo 
+
+            %vconn00_stream_load  = load i32,  i32* @vconn00, !tir.mem.type !streamFifo 
+  store i32 %vconn00_stream_store,             i32* @vconn00, !tir.mem.type !streamFifo 
+
+            %vconn10_stream_load  = load i32,  i32* @vconn10, !tir.mem.type !streamFifo 
+  store i32 %vconn10_stream_store,             i32* @vconn10, !tir.mem.type !streamFifo 
+ 
+            %vconn100_stream_load  = load i32,  i32* @vconn100, !tir.mem.type !streamFifo 
+  store i32 %vconn100_stream_store,             i32* @vconn100, !tir.mem.type !streamFifo 
+
+  
+  ;----------------------------------------------
+  ;-- Connect peer KERNELS for CG-pipeline
+  ;----------------------------------------------
+  call [pndmap 2] @kernel_map_f1  ( %vin0_stream_load
+                                  , %vin1_stream_load
+                                  , %vconn0_stream_store
+                                  , %vconn1_stream_store
+                                  ) pipe
+
+  call @kernel_unzip_A  ( %vconn0_stream_load
+                        , %vconn1_stream_load
+                        , %vconn00_stream_store
+                        , %vconn10_stream_store
+                        ) pipe
+                 
+  call @kernel_map_f2 ( %vconn10_stream_load
+                      , %vconn100_stream_store
+                      ) pipe
+                
+  call @kernel_fold_f2 ( %vconn00_stream_load
+                       , @sconn000
+                       ) pipe
+
+  call @kernel_map_f3 ( %vconn100_stream_load
+                      , %vout_stream_store
+                      , @sconn000
+                      ) pipe
+  ret void
+}
+
+
+
+;-------------------------------------------------------------------------------
+;--main 
+;-------------------------------------------------------------------------------
+
+;--The TyTra-IR is limited to the DEVICE-CODE on the kernel
+;--So while we do "declare" variables in the global-memory space
+;--we are not worried about initializing (or post-processing) them
+;--as that is assumed to happen outside the scope of this device-side
+;--program
+
+define void @main () {
+
+  ;-- *MEMORY OBJECTS* 
+  ;-- We simply use LLVM's global variables call to create memory objects
+  ;-- in LLVM, all "memory objects" are accessed using pointers
+  ;-- addrspace(1) is the global address space, so these
+  ;-- arrays are created in the Global Memory
+  @vin0 = addrspace(1) [NLinear x i32]
+  @vin1 = addrspace(1) [NLinear x i32]
+  @vout = addrspace(1) [NLinear x i32]
+
+  ;-- *CREATING STREAMS FROM MEMORIES* 
+  ;-- The !tir.mem.<property_name> !<property_value> pair
+  ;-- is used to specify stream properties
+  ;-- being created. In these cases, it is a simple 1d stream
+  ;-- from that memory object
+  ;-- Note that stream directions are from the P.O.V of memory object
+  ;
+  %vin0_stream_load = load i32, i32* @vin0
+                      , !tir.mem.type   !stream1d
+                      , !tir.mem.saddr  !0
+                      , !tir.mem.size   !NLinear
+                      , !tir.mem.stride !1
+
+  %vin1_stream_load = load i32, i32* @vin1
+                      , !tir.mem.type   !stream1d
+                      , !tir.mem.saddr  !0
+                      , !tir.mem.size   !NLinear
+                      , !tir.mem.stride !1
+
+  store i32 %vout_stream_store, i32* @vout
+                      , !tir.mem.type   !stream1d
+                      , !tir.mem.saddr  !0
+                      , !tir.mem.size   !NLinear
+                      , !tir.mem.stride !1
+
+  ;--define the constant   s0
+  %s0 = alloca i32
+  store i32 3, i32* %s0
+
+  ;--call the top level kernel and pass it the streams and the constant
+  ;--call it with PIPELINED parallelism
+  ;--so every first-class element in THAT function will
+  ;--be pipelined
+  call @kernelTop ( i32 %vin0_stream_load
+                  , i32 %vin1_stream_load
+                  , i32 %s0
+                  , i32 %vout_stream_store
+                  ) pipe
+  ret void
+}

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Root VersionMajor="3" VersionMinor="3" IpCache="no">
+  <Kernels>
+    <Kernel Name="sdx_kernel_wizard_0" Dir="sdx_kernel_wizard_0" IP="ip_repo/mycompany_com_kernel_sdx_kernel_wizard_0_1_0" TopIpDir="." ProjectID="59d3154884a54b9f81f7e5a5c3b40031">
+      <SupportedFlows>
+        <SupportedFlow>HW_EMU</SupportedFlow>
+        <SupportedFlow>SYSTEM</SupportedFlow>
+      </SupportedFlows>
+    </Kernel>
+  </Kernels>
+</Root>

@@ -1,0 +1,44 @@
+import os
+
+source = 'barebones.c';
+
+#LLVM-IR builder
+#llvm_bld = Builder(action = 'clang -S -O2 < '+ source)
+
+#import the entire OS environment (OS env variables will effect build)
+env = Environment(ENV = os.environ)
+
+#env = Environment()
+#env = Environment(BUILDERS = {'llvm' : llvm_bld})
+
+
+#debug
+env.Append(CFLAGS='-pg')
+env.Append(LINKFLAGS='-pg')
+
+#C standard
+env.Append(CFLAGS='-std=c99')
+env.Append(LINKFLAGS='-std=c99')
+
+#optimization effort
+env.Append(CFLAGS='-O3')
+env.Append(LINKFLAGS='-O3')
+
+#LLVM build
+#env.llvm(source)
+
+#executable
+program   = env.Program (source)
+
+#execution = env.Command (None,None,"./vertical")
+
+#Depends(execution, program)
+
+#profiling.. find a way to add this to scons build
+
+#reading gprof data
+#gprof vertical gmon.out > profile.dat
+
+#illustrating gprof data using dot
+#gprof vertical | /opt/gprofdot/gprof2dot.py | dot -Tpng -o output.png
+

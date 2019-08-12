@@ -1,0 +1,12 @@
+WN, Glasgow, 2019.06.26
+=======================
+
++ 1d shallow water with layers from Kampf (Ex 7)
+Not complete, the DYN is implemented as a multi-cycle stub.
+DYN has some interesting dependencies in the layer modelling code that I am not tackling yet.
+Preceding kernel though as SIN/COS which is useful for DSE.
+
+
+
+ 
+

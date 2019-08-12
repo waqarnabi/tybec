@@ -1,0 +1,31 @@
+import os
+
+env = Environment()
+
+#debug
+env.Append(F95FLAGS='-pg')
+env.Append(LINKFLAGS='-pg')
+
+
+#do not truncate long  lines
+env.Append(F95FLAGS='-ffree-line-length-none')
+env.Append(LINKFLAGS='-ffree-line-length-none')
+
+#optimization effort
+#env.Append(F95FLAGS='-O1')
+#env.Append(LINKFLAGS='-O1')
+
+program   = env.Program ('barebones.f95')
+
+#execution = env.Command (None,None,"./vertical")
+
+#Depends(execution, program)
+
+#profiling.. find a way to add this to scons build
+
+#reading gprof data
+#gprof vertical gmon.out > profile.dat
+
+#illustrating gprof data using dot
+#gprof vertical | /opt/gprofdot/gprof2dot.py | dot -Tpng -o output.png
+

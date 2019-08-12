@@ -1,0 +1,39 @@
+Template versions:
+
+# t01
++ Used for fpode examples
++ sdx ver 2017.4
++ 2 inputs, 1 output
++ no scalars
++ flopoco control bits _not_ handled internally, so this is broken, as testbench generation now presumes internal handling of flopoco bits
+
+#t09
++ Used for coriolis (hindawi)
++ sdx ver 2018.2
++ 4 inptus, 4 outputs
++ coalesced input and coalesced outputs
++ flopoco control bits handled internally
+
+
+
+
+#### discarded ###
+#t03
++ DISCARDED
+
+#t04
++ DISCARDED
+
+#t05
++ DISCARDED
+
+#t06
++ DISCARD
+
+#t08 - BUGGY, DISCARD
++ Used for coriolis (hindawi)
++ sdx ver 2018.2
++ 4 inptus, 4 outputs
++ coalesced input and coalesced outputs
++ flopoco control bits handled internally
+

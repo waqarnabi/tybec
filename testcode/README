@@ -1,0 +1,66 @@
+WN, 2017.05.02, Glasgow
+-----------------------
+
+* This is a set of test-cases for the TyTra back-end compiler (TyBEC).
+* It is based on the 2017 version (TIR-17).
+* I am not doing an regression tests, so different testcodes are operational/current at different stages for different versions. 
+
+
+Test cases
+---------
+// 0 //
+This is the zeroth test-case for TyBEC-17. 
+It is a synthetic, barebones example to get the entire flow working (all the way to rtl and opencl-wrapper generation).
+Used for _hindawi_
+
+// 1 //
+Simple synthetic example based on the illustration used in the HiPEAC-17 paper (see ./1_.../docs)
+
+// 2 //
+This is a simple test case that is used to test the new feature (C-->LLVM-->TIR) that links TyBEC with Tytra-CL (Cris's work).
+
+// 3 //
+This is the FLOAT version of testcode #0 (i.e. barebones)
+
+// 4 //
+Floats, with unbalanced paths and buffer inference
+
+// 7 //
+Same as 0, but with the intent to create Kernel (CG) pipelines in the OCL (i.e. each kernel as an opencl shell)
+
+// 8 //
+*2018.12*
+Testing stencils, buffer inference, async handshakes, SDX integration. Major upgrade.
+
+// 9 //
+2019.02
+For testing integration with ocl2tir. Input is opencl kernel code with channels, 
+output TIR via clang, and then running TyBEC on it.
+
+Note 8 and 9 are being tested and developed concurrently, as of 2019.02.20
+
+
+// 10 //
+2019.06
+SOR kernel, for testing DSE at CL level and also eventually HDL code gen.
+One version "injected" with a multi-cycle iterative POW function to test CL split-merge opt.
+
+// 11 //
+
+// 12 //
+Coriolis was created to test cos/sin, but since they are computed at compile time constants, no point opt those.
+Used for _hindawi_
+
+// 13 //
+1d shallow water with layers from Kampf (Ex 7)
+Not complete, the DYN is implemented as a multi-cycle stub.
+DYN has some interesting dependencies in the layer modelling code that I am not tackling yet.
+Preceding kernel though as SIN/COS which is useful for DSE.
+
+// 14 //
+Synthetic example, 13 modified to have _both_ sin and pow, which are both multi-cycle units with different latencies.
+
+// 15 // 
+Modified version of #0, to test select and compare instructions
+
+

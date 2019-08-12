@@ -1,0 +1,45 @@
+Demo/Test
+---------
+
++ Go to bolama
++ source ~/go.wn.aws.sdx.local.sh
++ go to clean folder tir input file
++ run tybec with approp flags
++ go to gen code folder
++ run local_hwEmu_build.sh
++ run local_hwSyhtn_build.sh
+
+
++ start aws f1 instance
++ (upload synthesized file from local machine to aws instance)
++ connect to aws instance (from ~/.ssh)
++ source sd_accel setup
++ go to synthesized code folder
++ source additional setup script
++ run
+
+
+
+
+Notes
+-----
+2019.02.12
+
++ The pre-synthesize code on AWS was not working for some odd reason. Seemed like the correct AFI wasnt loaded first, so I tried this:
+
+
+sudo fpga-describe-local-image -S 0
+sudo fpga-load-local-image -S 0 -I <Your AGFI ID>
+
+where:
+
+for vect2
+afi-02983b4170ad29fad
+agfi-0b4d6da29c987c718
+
+vect16
+agfi-0cd30adf3b89f3853
+
+But then I still got some error (PCI Bar Memory)
+See this for relevant error and discussion:
+https://forums.aws.amazon.com/thread.jspa?messageID=870383&tstart=0

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Root VersionMajor="3" VersionMinor="3" IpCache="no">
+  <Kernels>
+    <Kernel Name="top" Dir="top" IP="ip_repo/tytra_kernel_top_1_0" TopIpDir="." ProjectID="e1c813566ed3412c99dd4c1d0e1d7e68">
+      <SupportedFlows>
+        <SupportedFlow>HW_EMU</SupportedFlow>
+        <SupportedFlow>SYSTEM</SupportedFlow>
+      </SupportedFlows>
+    </Kernel>
+  </Kernels>
+</Root>

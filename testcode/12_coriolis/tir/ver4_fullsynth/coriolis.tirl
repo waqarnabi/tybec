@@ -1,0 +1,233 @@
+;-- =============================================================================
+;-- Company      : Unversity of Glasgow, Comuting Science
+;-- Author:        Syed Waqar Nabi
+;-- 
+;-- Create Date  : 2014.10.27
+;-- Project Name : TyTra
+;--
+;-- Dependencies : 
+;--
+;-- Revision     : 
+;-- Revision 0.01. File Created
+;-- Revision 0.02. 2019.06.19: Updated to tybec-17 version, incorporated as a test case
+;-- 
+;-- Conventions  : 
+;-- =============================================================================
+
+;-- =============================================================================
+;-- General Description
+;-- -----------------------------------------------------------------------------
+;-- Tytra-IR BACKEND file for Coriolis Kernel
+;--
+;-- While this kernsl has two modes, at run time we may beed to choose one or the 
+;-- other, set by the host-controlled MODE variable
+;-- so we instantiate BOTH mode kernels
+;-- =============================================================================
+
+
+#define SIZE   262144
+#define data_t float32 
+
+;--I have the same arithmetic instructions for data_t/int for now
+#define fadd add
+#define fsub sub
+#define fmul mul
+#define fdiv udiv
+
+;--constants initiliazed from values taken from C execution
+#define ALPHA -0.062832
+#define BETA  0.000987
+#define DT    432.000000
+
+;--no point computing constants in HDL (and back-end code gen
+;--not able to generate units with both constant inputs anyway, though 
+;--that could be easily fixed
+#define ONE_MINUS_BETA 0.999013
+#define ONE_PLUS_BETA  1.000987
+
+
+;--mode also defined as a macro
+#define mode 1
+
+; -----------------------------------------------------------------------------
+;-- coriolis_ker0
+; -----------------------------------------------------------------------------
+
+;-- If one operand is constant in a leaf node, it MUST be the SECOND operand. This is a silly limitation, will fail in non-commutative operations anyway. FIXME.
+
+define void @coriolis_ker0  ( data_t %u
+                            , data_t %v
+                            , data_t %un
+                            , data_t %vn
+                            ) pipe 
+{
+#if (mode==1)
+  data_t %mul   = fmul data_t %u, ONE_MINUS_BETA
+  data_t %mul1  = fmul data_t %v, ALPHA
+  data_t %add   = fadd data_t %mul, %mul1
+  data_t %un    = fdiv data_t %add, ONE_PLUS_BETA
+
+  data_t %mul4 = fmul data_t %v, ONE_MINUS_BETA
+  data_t %mul5 = fmul data_t %u, ALPHA
+  data_t %sub6 = fsub data_t %mul4, %mul5
+  data_t %vn   = fdiv data_t %sub6, ONE_PLUS_BETA
+#else
+  call @cos(data_t %conv)
+  data_t %cos1  = 
+  data_t %mul   = fmul data_t %u, %sub
+  data_t %mul1  = fmul data_t ALPHA, %v
+  data_t %add   = fadd data_t %mul, %mul1
+  data_t %add2  = fadd data_t 1.0, BETA
+  data_t %un    = fdiv data_t %add, %add2
+
+  data_t %sub3 = fsub data_t 1.0, BETA
+  data_t %mul4 = fmul data_t %v, %sub3
+  data_t %mul5 = fmul data_t ALPHA, %u
+  data_t %sub6 = fsub data_t %mul4, %mul5
+  data_t %add7 = fadd data_t 1.0, BETA
+  data_t %vn   = fdiv data_t %sub6, %add7
+#endif                        
+  ret void
+}    
+
+
+;--WN: had to divide this ker1 into 2 sub  kernels, see NOTES for 2019.07.15:
+;--    all functions must be weakly connected graphs, no disconnect allowed (for code gen purposes) FIXME
+
+; -----------------------------------------------------------------------------
+;-- coriolis_ker1
+; -----------------------------------------------------------------------------
+;--define void @coriolis_ker1  ( data_t %x
+;--                            , data_t %y
+;--                            , data_t %un
+;--                            , data_t %vn
+;--                            , data_t %xn
+;--                            , data_t %yn
+;--                            ) pipe 
+;--{
+;--  data_t %mul = fmul data_t DT, %un
+;--  data_t %div = fdiv data_t %mul, 1000.0
+;--  data_t %xn  = fadd data_t %x, %div
+;--  
+;--  data_t %mul1 = fmul data_t DT, %vn
+;--  data_t %div2 = fdiv data_t %mul1, 1000.0
+;--  data_t %yn   = fadd data_t %y, %div2
+;--  ret void
+;--}
+
+
+; -----------------------------------------------------------------------------
+;-- coriolis_ker1_subker0
+; -----------------------------------------------------------------------------
+;--WN: had to divide this intt
+define void @coriolis_ker1_subker0  ( 
+    data_t %x
+  , data_t %un
+  , data_t %xn
+  ) pipe 
+{
+  data_t %mul = fmul data_t %un, DT
+  data_t %div = fdiv data_t %mul, 1000.0
+  data_t %xn  = fadd data_t %x, %div  
+  ret void
+}
+
+; -----------------------------------------------------------------------------
+;-- coriolis_ker1_subker1
+; -----------------------------------------------------------------------------
+;--WN: had to divide this intt
+define void @coriolis_ker1_subker1  ( 
+    data_t %y
+  , data_t %vn
+  , data_t %yn
+  ) pipe 
+{
+  data_t %mul1 = fmul data_t %vn, DT
+  data_t %div2 = fdiv data_t %mul1, 1000.0
+  data_t %yn   = fadd data_t %y, %div2
+  ret void
+}
+
+; -----------------------------------------------------------------------------
+;-- kernel_top
+; -----------------------------------------------------------------------------
+define void @kernel_top(  data_t %u
+                        , data_t %v
+                        , data_t %x
+                        , data_t %y
+                        , data_t %un
+                        , data_t %vn
+                        , data_t %xn
+                        , data_t %yn
+                        ) pipe
+{
+;-- I cannot allow output arguments in hierarhichial functions to *also* be intermediate
+;-- arguments between peer kernels
+;-- That is because each module/node has to be synchronized at the output, so all
+;-- outputs must be valid _at the same index_ at the same time.
+;-- If I put delay buffers to synchronize such local-use-also ouputs to other outputs,
+;-- then their local consumption will suffer latency, delaying the other outputs further still, so 
+;-- and so on ad inifintum...
+  
+  call @coriolis_ker0 ( data_t %u
+                      , data_t %v
+                      , data_t %un_local
+                      , data_t %vn_local
+                      ) 
+                        
+  call @coriolis_ker1_subker0 ( data_t %x
+                      , data_t %un_local
+                      , data_t %xn
+                      )     
+                      
+  call @coriolis_ker1_subker1 ( data_t %y
+                      , data_t %vn_local
+                      , data_t %yn
+                      )     
+  data_t %un = load data_t %un_local
+  data_t %vn = load data_t %vn_local
+                      
+  ret void
+}                        
+
+
+
+; ----------------------------------------------------------
+; -- ** MAIN
+; ----------------------------------------------------------
+
+define void @main () {
+  %u  = alloca [SIZE x data_t], addrspace(1)
+  %v  = alloca [SIZE x data_t], addrspace(1)
+  %x  = alloca [SIZE x data_t], addrspace(1)
+  %y  = alloca [SIZE x data_t], addrspace(1)
+  %un = alloca [SIZE x data_t], addrspace(1)
+  %vn = alloca [SIZE x data_t], addrspace(1)
+  %xn = alloca [SIZE x data_t], addrspace(1)
+  %yn = alloca [SIZE x data_t], addrspace(1)
+ 
+  %u_stream = streamread data_t, data_t*  %u  , !tir.stream.type !stream1d, !tir.stream.size !SIZE
+  %v_stream = streamread data_t, data_t*  %v  , !tir.stream.type !stream1d, !tir.stream.size !SIZE
+  %x_stream = streamread data_t, data_t*  %x  , !tir.stream.type !stream1d, !tir.stream.size !SIZE
+  %y_stream = streamread data_t, data_t*  %y  , !tir.stream.type !stream1d, !tir.stream.size !SIZE
+                                        
+  streamwrite data_t %un_stream, data_t* %un, !tir.stream.type !stream1d, !tir.stream.size !SIZE
+  streamwrite data_t %vn_stream, data_t* %vn, !tir.stream.type !stream1d, !tir.stream.size !SIZE
+  streamwrite data_t %xn_stream, data_t* %xn, !tir.stream.type !stream1d, !tir.stream.size !SIZE
+  streamwrite data_t %yn_stream, data_t* %yn, !tir.stream.type !stream1d, !tir.stream.size !SIZE
+
+  ;--call the top level kernel and pass it the streams and the constant
+  call @kernel_top (
+     data_t %u_stream
+    ,data_t %v_stream
+    ,data_t %x_stream
+    ,data_t %y_stream
+    ,data_t %un_stream
+    ,data_t %vn_stream
+    ,data_t %xn_stream
+    ,data_t %yn_stream
+    )
+ 
+  ret void
+}
+

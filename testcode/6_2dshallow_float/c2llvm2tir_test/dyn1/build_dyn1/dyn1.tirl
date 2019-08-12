@@ -1,0 +1,26 @@
+;-- Generation time stamp :: Thu Jun 13 13:52:02 2019
+;-- Found write_pipe definition
+;-- Found read_pipe definition
+;-- Found get_pipe_num_packets definition
+
+;-- ------------------
+;-- kernelTop
+;-- ------------------
+define void @kernelTop  (
+) pipe {
+
+	ret void
+}
+
+;-- ------------------
+;--  MAIN
+;-- ------------------
+
+#define NLinear 18
+
+define void @main () {
+
+call @kernelTop (
+)
+	ret void
+}

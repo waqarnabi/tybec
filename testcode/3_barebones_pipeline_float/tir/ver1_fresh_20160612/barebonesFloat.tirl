@@ -1,0 +1,161 @@
+;-- =========================================================
+;-- Company      : Unversity of Glasgow, Comuting Science
+;-- Author:        Syed Waqar Nabi
+;-- 
+;-- Create Date  : 2017.06.19
+;-- Project Name : TyTra
+;--
+;-- Dependencies : 
+;--
+;-- Revision     : 
+;-- Revision 0.01. File Created
+;-- 
+;-- Conventions  : 
+;-- =========================================================
+;--
+;-- =========================================================
+;-- General Description
+;-- ---------------------------------------------------------
+;-- Tytra-IR BACKEND file for the "barebones" code 
+;-- 
+;-- This is TIR-17 version
+;-- ** Version 1 ** Simple CG pipeline, no splits/merges
+;-- =========================================================
+
+;-- **************************************************
+;--            *** MANAGE-IR ***  
+;-- **************************************************
+;-- C-style macros 
+#define NLinear 128
+;--#define data_t  i32
+#define data_t  float32
+
+
+; ----------------------------------------------------------
+; -- ** kernel_A
+; ----------------------------------------------------------
+define void @kernel_A ( data_t %ka_vin0 
+                      , data_t %ka_vin1
+                      , data_t %ka_vout
+                      ) pipe {
+;--  data_t %ka_vout    = add data_t %ka_vin0, %ka_vin1
+  data_t %local1     = add data_t %ka_vin0, %ka_vin1
+  data_t %ka_vout    = add data_t %local1, %local1
+  ret void
+}
+
+; ----------------------------------------------------------
+; -- ** kernel_B
+; ----------------------------------------------------------
+define void @kernel_B ( data_t %kb_vin 
+                      , data_t %kb_vout
+                      ) pipe {
+  data_t %kb_vout  = add data_t %kb_vin, %kb_vin
+  ret void
+}
+
+; ----------------------------------------------------------
+; -- ** kernel_C
+; ----------------------------------------------------------
+define void @kernel_C ( data_t %kc_vin 
+                      , data_t %kc_vout
+                      ) pipe {
+  ;--data_t %kc_vout  = add data_t %kc_vin, %kc_vin
+  data_t %kc_vout  = mul data_t %kc_vin, %kc_vin
+  ret void
+}
+
+; ----------------------------------------------------------
+; -- ** kernel_D
+; ----------------------------------------------------------
+define void @kernel_D ( data_t %kd_vin 
+                      , data_t %kd_vout
+                      ) pipe {
+  data_t %kd_vout  = add data_t %kd_vin, %kd_vin
+  ret void
+}
+
+; ----------------------------------------------------------
+; -- ** kernelTop
+; ----------------------------------------------------------
+define void @kernelTop  ( data_t %kt_vin0
+                        , data_t %kt_vin1
+                        , data_t %kt_vout
+                        ) pipe
+{
+  call @kernel_A ( data_t %kt_vin0
+                 , data_t %kt_vin1
+                 , data_t %vconn_A_to_B
+                 ) 
+
+  call @kernel_B ( data_t %vconn_A_to_B
+                 , data_t %vconn_B_to_C
+                 ) 
+
+  call @kernel_C ( data_t %vconn_B_to_C
+                 , data_t %vconn_C_to_D
+                 ) 
+
+  call @kernel_D ( data_t %vconn_C_to_D
+                 , data_t %kt_vout
+                 ) 
+  ret void
+}
+
+; ----------------------------------------------------------
+; -- ** MAIN
+; ----------------------------------------------------------
+
+;--The TyTra-IR is limited to the DEVICE-CODE on the kernel
+;--So while we do "declare" variables in the global-memory space
+;--we are not worried about initializing (or post-processing) them
+;--as that is assumed to happen outside the scope of this device-side
+;--program
+
+define void @main () {
+;-- MEMORY OBJECTS
+;-- in LLVM, all "memory objects" are accessed using pointers
+;-- addrspace(1) is the global address space, so these
+;-- arrays are created in the Global Memory
+
+;-- note: Earlier I was using @ (globals) for global memories, but
+;--       I am changing that to % as I think there was no need for that differentiation
+ ;--@vin0 = addrspace(1) [NLinear x udata_t]
+ %vin0  = alloca [NLinear x data_t], addrspace(1) 
+ %vin1  = alloca [NLinear x data_t], addrspace(1) 
+ %vout  = alloca [NLinear x data_t], addrspace(1)  
+
+ ;-- *CREATING STREAMS FROM MEMORIES* 
+  ;-- The !tir.mem.<property_name> !<property_value> pair
+  ;-- is used to specify stream properties
+  ;-- being created. In these cases, it is a simple 1d stream
+  ;-- from that memory object
+  ;-- Note that stream directions are from the P.O.V of memory object
+  ;
+  ;--//stream_read
+
+ 
+ %vin0_stream_load = streamread data_t, data_t*  %vin0 
+                   , !tir.stream.type   !stream1d
+                   , !tir.stream.size   !NLinear
+                   , !tir.stream.saddr  !0
+                   , !tir.stream.stride !1
+
+  %vin1_stream_load = streamread data_t, data_t* %vin1
+                    , !tir.stream.type   !stream1d
+                    , !tir.stream.size   !NLinear
+                    , !tir.stream.saddr  !0
+                    , !tir.stream.stride !1
+  
+  streamwrite data_t %vout_stream_store, data_t* %vout
+                    , !tir.stream.type   !stream1d
+                    , !tir.stream.saddr  !0
+                    , !tir.stream.size   !NLinear
+                    , !tir.stream.stride !1
+  ;--call the top level kernel and pass it the streams and the constant
+  call @kernelTop ( data_t %vin0_stream_load
+                  , data_t %vin1_stream_load
+                  , data_t %vout_stream_store
+                  )
+  ret void
+}

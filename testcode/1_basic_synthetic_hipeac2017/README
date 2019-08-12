@@ -1,0 +1,23 @@
+WN, Glasgow, 2017.05.02
+=======================
+
+This is the first test-case for TyBEC-17. 
+It is based on the synthetic example used for the HiPEAC-2017 paper  (see ./doc).
+
+In more or less the same form, it also appears in the ../201612_TyTra17upgrade_Smache project.
+
+The example is designed to be as simple as possible, yet which exposes the patterns that we want to experiment with.
+Specifically, maps and folds on parallel paths, splits and merges, offsets between peer kernels, etc. 
+The computation kernels are kept as simple as possible for now (single integer instruction in most cases), but 
+more complex kernels can be tested as within the same template.
+
+
+BUILD & RUN (C and Fortran)
+------------
+0. cd ./c (./fortran)
+1. scons
+2. ./illustration.exe
+
+TIR VERSIONS
+------------
+See ./tir/README      

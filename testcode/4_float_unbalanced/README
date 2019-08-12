@@ -1,0 +1,17 @@
+WN, Glasgow, 2018.03.16
+=======================
+
+This is another synthetic example, based on testcase #0, converted to floats, and then I introduce unbalanved pipelines and check buffer inference.
+
+
+FORTRAN has not been written. 
+
+BUILD & RUN (C and Fortran)
+------------
+0. cd ./c (./fortran)
+1. scons
+2. ./barebones.exe
+
+TIR VERSIONS
+------------
+See ./tir/README      
